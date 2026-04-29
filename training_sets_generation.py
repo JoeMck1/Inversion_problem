@@ -6,30 +6,31 @@ import numpy as np
 
 class TrainingSets:
     def __init__(
-        self, energies: list, n_b: int, n_rho: int, n_nodes: int, sigma: float
+        self, energies: list, n_b: int, n_nodes: int, sigma: float
     ) -> None:
         self.energies = energies
-        self.e_min = energies[0]
         self.e_max = energies[-1]
 
         self.n_b = n_b
-        self.n_rho = n_rho
         self.n_nodes = n_nodes
 
         # sigma is a 'resolution parameter'
         self.sigma = sigma
+
+        random.seed(n_b)  # MIGHT NEED CHANGING
+        self.e_0 = 0.8  # random.uniform(0.2, 1.3)  # GeV
         pass
 
     @staticmethod
-    def exp_map(E: float) -> float:
-        return 1 - 2 * np.exp(-E)
+    def exp_map(e):
+        return 1 - 2 * np.exp(-e)
 
     def exp_map_max(self):
         x_max = self.exp_map(self.e_max)
         return x_max
 
     def exp_map_min(self):
-        x_min = self.exp_map(self.e_min)
+        x_min = self.exp_map(self.e_0)
         return x_min
 
     @staticmethod
@@ -103,25 +104,73 @@ class TrainingSets:
         i_n = (np.pi / self.n_nodes) * np.sum(i_n_terms, axis=0)
         return i_n
 
-    def random_spectral_densities(self):
+    def random_coefficients(self):
         epsilon = 10e-7
-        random.seed(10)
 
-        E_0 = random.uniform(0.2, 1.3)  # GeV
         rns = [random.uniform(-1, 1) for _ in range(self.n_b)]
         coeffs = [rns[0]] + [
             rn / (idx + 1) ** (1 + epsilon) for idx, rn in enumerate(rns[1:])
         ]
+        return coeffs
 
-        # spectral_density_j =
+    def smeared_spectral_densities(self):
+
+        i_n_matrix = np.array([self.i_n_Ej(n) for n in range(self.n_b)])
+
+        smeared_densities = self.random_coefficients() @ i_n_matrix
+
+        return smeared_densities
+
+    def spectral_densities(self):
+        mapped_Es = self.exp_map(self.energies)
+        random_coeffs = self.random_coefficients()
+
+        total_rhos = []
+        for e in mapped_Es:
+            if self.e_0 >= e:
+                total_rhos.append(0)
+                continue
+
+            total_rho = sum(
+                random_coeffs[n - 1] * (self.t_n(n)(e) - self.t_n_min(n))
+                for n in range(1, self.n_b + 1)
+            )
+            total_rhos.append(total_rho)
+
+        return total_rhos
 
 
 if __name__ == "__main__":
-    muon_mass = 1
+    import matplotlib.pyplot as plt
+
+    sigma = 0.5 / (2 * (np.log(4)))  # GeV
+    muon_mass = 0.10566  # GeV
     e_max, e_min = 24 * muon_mass, muon_mass
     e_range = np.linspace(e_min, e_max, 47)
 
-    training_sets = TrainingSets(
-        energies=e_range, n_b=5, n_rho=1, n_nodes=5, sigma=1
+    n_b_values = [16, 32, 128, 512]
+
+    plt.rcParams.update(
+        {
+            "text.usetex": True,
+            "font.family": "serif",
+            "font.serif": ["Latin Modern Math"],
+        }
     )
-    print(training_sets.i_n_Ej(2))
+    fig, ax = plt.subplots()
+
+    for n_b in n_b_values:
+        training_sets = TrainingSets(
+            energies=e_range, n_b=n_b, n_rho=10, n_nodes=50, sigma=sigma
+        )
+
+        smeared = training_sets.smeared_spectral_densities()
+
+        ax.plot(e_range, smeared, label=rf"$N_b$ = {n_b}")
+
+    ax.set_xlabel(r"$E$ [GeV]")
+    ax.set_ylabel(r"$\hat{\rho}_\sigma(E)$")
+    ax.set_title(r"Smeared Spectral Densities for different $N_b$")
+    ax.legend()
+
+    plt.show()

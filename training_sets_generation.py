@@ -1,11 +1,11 @@
 from typing import Callable, Literal
-
+from numpy.typing import ArrayLike
 import numpy as np
 
 
 class TrainingSets:
     def __init__(
-        self, energies: list, n_b: int, n_ch_nodes: int, sigma: float
+        self, energies: list, n_b: int, n_ch_nodes: int, sigma: float, n_t
     ) -> None:
         self.energies = energies
         self.e_max = energies[-1]
@@ -13,28 +13,86 @@ class TrainingSets:
         self.n_b = n_b  # number of basis functions.
         self.n_ch_nodes = n_ch_nodes  # number of Chebyshev nodes.
         self.sigma = sigma  # sigma is a 'resolution parameter'.
+        self.n_t = n_t  # number of time-slices
+
+        self.time_slices = np.arange(1, self.n_t + 1)
 
         # self.rho = n_rho # number of random spectral densities.
 
+        # deterministic RNG per instance
         self.rng = np.random.default_rng(seed=n_b)  # MIGHT NEED CHANGING
         self.e_0 = 0.8  # random.uniform(0.2, 1.3)  # GeV
+
+        # precompute once
+        self.coeffs = self._random_coefficients()
+        self.nodes = self._chebyshev_nodes()
+
+        # precompute mapped Chebyshev nodes once
+        self.x_nodes = self._mapped_chebyshev_nodes(self.nodes)
         pass
 
     @staticmethod
-    def exp_map(e):
-        return 1 - 2 * np.exp(-e)
+    def exp_map(e: ArrayLike) -> np.ndarray:
+        """Return an exponential mapping of the input e.
 
-    def exp_map_max(self):
+        This is a function used to map energies to the [-1, 1] domain.
+
+        Parameters
+        ----------
+        e: ArrayLike
+            The input energy or energies.
+
+        Returns
+        -------
+        x : ndarray
+            Array of the mapped energy value(s).
+        """
+
+        x = 1 - 2 * np.exp(-e)
+        return x
+
+    def exp_map_max(self) -> np.floating:
+        """Return the exponential mapping of the maximum input energy.
+
+        Returns
+        -------
+        x_max : floating
+            The np.floating of the mapped E_max value.
+        """
         x_max = self.exp_map(self.e_max)
         return x_max
 
-    def exp_map_min(self):
+    def exp_map_min(self) -> np.floating:
+        """Return the exponential mapping of the minimum input energy.
+
+        NOTE: in the literature E_min is denoted E_0.
+
+        Returns
+        -------
+        x_min : floating
+            The np.floating of the mapped E_min value.
+        """
         x_min = self.exp_map(self.e_0)
         return x_min
 
-    def gui(self, node):
+    def _mapped_chebyshev_nodes(self, nodes: np.ndarray) -> np.ndarray:
+        """Return the mapped Chebyshev nodes.
+
+        This mapping arises from the map needed for mapping the
+        [x_0, x_max] domain to [-1, 1].
+
+        Parameters
+        ----------
+        nodes : ndarray
+            Array of Chebyshev nodes to be mapped.
+
+        Returns
+        -------
+        x : ndarray
+            Array of mapped Chebyshev nodes.
+        """
         x = (
-            (node + 1) * (self.exp_map_max() - self.exp_map_min()) / 2
+            (nodes + 1) * (self.exp_map_max() - self.exp_map_min()) / 2
         ) + self.exp_map_min()
         return x
 
@@ -57,83 +115,133 @@ class TrainingSets:
         cheb_poly = np.polynomial.chebyshev.Chebyshev.basis(n)
         return cheb_poly
 
-    def t_n_min(self, n):
-        cheb_min = self.t_n(n)(self.exp_map_min())
-        return cheb_min
+    def _chebyshev_nodes(self) -> np.ndarray:
+        """Generate an array of Chebyshev nodes.
 
-    def chebyshev_nodes(self):
+        Returns
+        -------
+        nodes: ndarray
+            An array of Chebyshev nodes, given by:
+            x_i = cos(\pi(2i -1)/2N), where N is the number of
+            Chebyshev nodes. We are free to choose this number.
+        """
 
         # use range(1, self.n_nodes + 1) and not range(self.n_nodes)
         # because the Chebyshev-Gauss quadrature is defined for i = 1
         # to n.
-        nodes = [
-            np.cos((np.pi * ((2 * i) - 1)) / (2 * self.n_ch_nodes))
-            for i in range(1, self.n_ch_nodes + 1)
-        ]
+
+        i = np.arange(1, self.n_ch_nodes + 1)
+        nodes = np.cos(((np.pi * ((2 * i) - 1)) / (2 * self.n_ch_nodes)))
+
         return nodes
 
-    def k_sigmas(self, node):
-        """Gaussian smearing kernel"""
-        omega = np.log((1 - self.gui(node)) / 2)
-
-        kernel = np.exp(
-            -((self.energies + omega) ** 2) / (2 * self.sigma**2)
-        ) / (self.sigma * (2 * np.pi) ** (1 / 2))
-        return kernel
-
-    def i_n_Ej(self, n):
-
-        i_n_terms = []
-        for node in self.chebyshev_nodes():
-            energy_terms = []
-            for k_sigma in self.k_sigmas(node):
-                prefactor = (
-                    (self.exp_map_max() - self.exp_map_min())
-                    * (1 - node**2) ** (1 / 2)
-                ) / (2 * (1 - self.gui(node)))
-
-                term = (
-                    prefactor
-                    * k_sigma
-                    * (self.t_n(n)(self.gui(node)) - self.t_n_min(n))
-                )
-                energy_terms.append(term)
-            i_n_terms.append(energy_terms)
-
-        i_n = (np.pi / self.n_ch_nodes) * np.sum(i_n_terms, axis=0)
-        return i_n
-
-    def random_coefficients(self):
+    def _random_coefficients(self):
         epsilon = 10e-7
-
         rns = self.rng.uniform(-1, 1, size=self.n_b)  # use seeded rng
-        coeffs = [rns[0]] + [
-            rn / (idx + 1) ** (1 + epsilon) for idx, rn in enumerate(rns[1:])
-        ]
+
+        coeffs = np.empty(self.n_b)
+        coeffs[0] = rns[0]
+        coeffs[1:] = rns[1:] / (np.arange(1, self.n_b) ** (1 + epsilon))
         return coeffs
 
-    def smeared_spectral_densities(self):
+    def _k_sigma_matrix(self) -> np.ndarray:
+        """Generate Gaussian smearing kernel.
 
-        i_n_matrix = np.array([self.i_n_Ej(n) for n in range(self.n_b)])
+        Returns a matrix of values for the Gaussian smearing kernel.
+        This is matrix since the kernel depend on energy and the
+        integration variable omega, which gets mapped to x and then to
+        g(u).
 
-        smeared_densities = self.random_coefficients() @ i_n_matrix
+        Returns
+        -------
+        kernel : ndarray
+            A 2-dimensional array of shape
+            (number of Chebyshev nodes, number of energies).
+        """
+        omega = np.log((1 - self.x_nodes) / 2)[:, None]  # shape (nodes, 1)
+        energies = self.energies[None, :]  # shape (1, energies)
 
-        return smeared_densities
+        kernel = np.exp(-((energies + omega) ** 2) / (2 * self.sigma**2)) / (
+            self.sigma * (2 * np.pi) ** (1 / 2)
+        )  # shape (nodes, energies)
+        return kernel
+
+    def _b_T_matrix(self):
+        omega = np.log((1 - self.x_nodes) / 2)[:, None]  # shape (nodes, 1)
+        times = self.time_slices[None, :]  # shape (1, times)
+
+        basis = ((omega**2) / (12 * np.pi**2)) * (
+            np.exp(-omega @ times) + np.exp(-omega @ (self.n_t - times))
+        )
+        return basis  # shape (nodes, times)
+
+    def _matrix_integration(self):
+
+        k_sigma = self._k_sigma_matrix()
+        b_T = self._b_T_matrix()
+
+        def integration(function):
+
+            prefactor = (
+                (self.exp_map_max() - self.exp_map_min())
+                * np.sqrt(1 - self.nodes**2)
+                / (2 * (1 - self.x_nodes))
+            )[
+                :, None
+            ]  # shape (nodes, 1)
+
+            weighted_kernel = prefactor * function  # shape (nodes, energies)
+
+            result = []
+
+            for n in range(self.n_b):
+                Tn_nodes = self.t_n(n)(self.x_nodes)[:, None]  # (nodes, 1)
+                Tn_min = self.t_n(n)(self.exp_map_min())
+
+                term = weighted_kernel * (Tn_nodes - Tn_min)
+                i_n = (np.pi / self.n_ch_nodes) * term.sum(axis=0)
+
+                result.append(i_n)
+
+            return np.array(result)  # shape (n_b, n_E)
+
+        i_n_matrix = integration(k_sigma)
+        j_n_matrix = integration(b_T)
+
+        return i_n_matrix, j_n_matrix
+
+    def bare_input_output_pair(self):
+        """Returns (C, \hat{rho}), not (C_noisy, \hat{rho}), hence the
+        label 'bare'.
+        """
+
+        smeared_density = (
+            self.coeffs @ self._matrix_integration()[0]
+        )  # shape (n_E,)
+        correlator = (
+            self.coeffs @ self._matrix_integration()[1]
+        )  # shape (n_t,)
+
+        return smeared_density, correlator
 
     def spectral_densities(self):
         mapped_Es = self.exp_map(self.energies)
-        random_coeffs = self.random_coefficients()
 
-        total_rhos = []
+        densities = []
         for e in mapped_Es:
+            if e <= self.exp_map_min():
+                densities.append(0)
+                continue
 
-            total_rho = np.heaviside((e - self.exp_map_min()), 0) * sum(
-                random_coeffs[n - 1] * (self.t_n(n)(e) - self.t_n_min(n))
-                for n in range(1, self.n_b + 1)
+            val = sum(
+                self.coeffs[n]
+                * (self.t_n(n + 1)(e) - self.t_n(n + 1)(self.exp_map_min()))
+                for n in range(self.n_b)
             )
-            total_rhos.append(total_rho)
 
-        return total_rhos
+            densities.append(val)
+
+        return densities
 
 
 if __name__ == "__main__":
@@ -152,11 +260,14 @@ if __name__ == "__main__":
     n_rhos = [50e3, 100e3, 200e3, 400e3, 800e3]
     n_bs = [16, 32, 128, 512]
 
-    # training_sets = TrainingSets(
-    #    energies=e_range, n_b=32, n_ch_nodes=10, sigma=sigma[0]
-    # )
-    # training_sets.random_coefficients()
-    # print(training_sets.e_0)
+    training_sets = TrainingSets(
+        energies=e_range, n_b=32, n_ch_nodes=10, sigma=sigma[0], n_t=15
+    )
+
+    output = training_sets.bare_input_output_pair()[1]
+
+    print(output.shape)
+    print(type(output))
 
     def smeared_spectral_densities_plot(
         n_b_values, e_range, sigma, smearing: Literal["Smeared", "Unsmeared"]
@@ -172,11 +283,11 @@ if __name__ == "__main__":
 
         for n_b in n_b_values:
             training_sets = TrainingSets(
-                energies=e_range, n_b=n_b, n_ch_nodes=50, sigma=sigma
+                energies=e_range, n_b=n_b, n_ch_nodes=50, sigma=sigma, n_t=15
             )
 
             if smearing == "Smeared":
-                densities = training_sets.smeared_spectral_densities()
+                densities = training_sets.bare_input_output_pair()[0]
                 ax.set_ylabel(r"$\hat{\rho}_\sigma(E)$")
 
             elif smearing == "Unsmeared":

@@ -1,23 +1,22 @@
-import random
-from typing import Callable
+from typing import Callable, Literal
 
 import numpy as np
 
 
 class TrainingSets:
     def __init__(
-        self, energies: list, n_b: int, n_nodes: int, sigma: float
+        self, energies: list, n_b: int, n_ch_nodes: int, sigma: float
     ) -> None:
         self.energies = energies
         self.e_max = energies[-1]
 
-        self.n_b = n_b
-        self.n_nodes = n_nodes
+        self.n_b = n_b  # number of basis functions.
+        self.n_ch_nodes = n_ch_nodes  # number of Chebyshev nodes.
+        self.sigma = sigma  # sigma is a 'resolution parameter'.
 
-        # sigma is a 'resolution parameter'
-        self.sigma = sigma
+        # self.rho = n_rho # number of random spectral densities.
 
-        random.seed(n_b)  # MIGHT NEED CHANGING
+        self.rng = np.random.default_rng(seed=n_b)  # MIGHT NEED CHANGING
         self.e_0 = 0.8  # random.uniform(0.2, 1.3)  # GeV
         pass
 
@@ -32,6 +31,12 @@ class TrainingSets:
     def exp_map_min(self):
         x_min = self.exp_map(self.e_0)
         return x_min
+
+    def gui(self, node):
+        x = (
+            (node + 1) * (self.exp_map_max() - self.exp_map_min()) / 2
+        ) + self.exp_map_min()
+        return x
 
     @staticmethod
     def t_n(n: int) -> Callable:
@@ -62,16 +67,10 @@ class TrainingSets:
         # because the Chebyshev-Gauss quadrature is defined for i = 1
         # to n.
         nodes = [
-            np.cos((np.pi * ((2 * i) - 1)) / (2 * self.n_nodes))
-            for i in range(1, self.n_nodes + 1)
+            np.cos((np.pi * ((2 * i) - 1)) / (2 * self.n_ch_nodes))
+            for i in range(1, self.n_ch_nodes + 1)
         ]
         return nodes
-
-    def gui(self, node):
-        x = (
-            (node + 1) * (self.exp_map_max() - self.exp_map_min()) / 2
-        ) + self.exp_map_min()
-        return x
 
     def k_sigmas(self, node):
         """Gaussian smearing kernel"""
@@ -101,13 +100,13 @@ class TrainingSets:
                 energy_terms.append(term)
             i_n_terms.append(energy_terms)
 
-        i_n = (np.pi / self.n_nodes) * np.sum(i_n_terms, axis=0)
+        i_n = (np.pi / self.n_ch_nodes) * np.sum(i_n_terms, axis=0)
         return i_n
 
     def random_coefficients(self):
         epsilon = 10e-7
 
-        rns = [random.uniform(-1, 1) for _ in range(self.n_b)]
+        rns = self.rng.uniform(-1, 1, size=self.n_b)  # use seeded rng
         coeffs = [rns[0]] + [
             rn / (idx + 1) ** (1 + epsilon) for idx, rn in enumerate(rns[1:])
         ]
@@ -127,11 +126,8 @@ class TrainingSets:
 
         total_rhos = []
         for e in mapped_Es:
-            if self.e_0 >= e:
-                total_rhos.append(0)
-                continue
 
-            total_rho = sum(
+            total_rho = np.heaviside((e - self.exp_map_min()), 0) * sum(
                 random_coeffs[n - 1] * (self.t_n(n)(e) - self.t_n_min(n))
                 for n in range(1, self.n_b + 1)
             )
@@ -143,34 +139,61 @@ class TrainingSets:
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
-    sigma = 0.5 / (2 * (np.log(4)))  # GeV
     muon_mass = 0.10566  # GeV
     e_max, e_min = 24 * muon_mass, muon_mass
     e_range = np.linspace(e_min, e_max, 47)
 
-    n_b_values = [16, 32, 128, 512]
+    sigma = [0.44, 0.63]  # GeV
 
-    plt.rcParams.update(
-        {
-            "text.usetex": True,
-            "font.family": "serif",
-            "font.serif": ["Latin Modern Math"],
-        }
-    )
-    fig, ax = plt.subplots()
+    # The n_rho and n_b values used to define the training sets in the
+    # paper are given below.
+    # At fixed n_b each training set includes the smaller ones i.e.
+    # T_sig(N_b, 100e3) includes T_sig(N_b, 50e3).
+    n_rhos = [50e3, 100e3, 200e3, 400e3, 800e3]
+    n_bs = [16, 32, 128, 512]
 
-    for n_b in n_b_values:
-        training_sets = TrainingSets(
-            energies=e_range, n_b=n_b, n_rho=10, n_nodes=50, sigma=sigma
+    # training_sets = TrainingSets(
+    #    energies=e_range, n_b=32, n_ch_nodes=10, sigma=sigma[0]
+    # )
+    # training_sets.random_coefficients()
+    # print(training_sets.e_0)
+
+    def smeared_spectral_densities_plot(
+        n_b_values, e_range, sigma, smearing: Literal["Smeared", "Unsmeared"]
+    ):
+        plt.rcParams.update(
+            {
+                "text.usetex": True,
+                "font.family": "serif",
+                "font.serif": ["Latin Modern Math"],
+            }
         )
+        fig, ax = plt.subplots()
 
-        smeared = training_sets.smeared_spectral_densities()
+        for n_b in n_b_values:
+            training_sets = TrainingSets(
+                energies=e_range, n_b=n_b, n_ch_nodes=50, sigma=sigma
+            )
 
-        ax.plot(e_range, smeared, label=rf"$N_b$ = {n_b}")
+            if smearing == "Smeared":
+                densities = training_sets.smeared_spectral_densities()
+                ax.set_ylabel(r"$\hat{\rho}_\sigma(E)$")
 
-    ax.set_xlabel(r"$E$ [GeV]")
-    ax.set_ylabel(r"$\hat{\rho}_\sigma(E)$")
-    ax.set_title(r"Smeared Spectral Densities for different $N_b$")
-    ax.legend()
+            elif smearing == "Unsmeared":
+                densities = training_sets.spectral_densities()
+                ax.set_ylabel(r"$\rho (E)$")
 
-    plt.show()
+            ax.plot(e_range, densities, label=rf"$N_b$ = {n_b}")
+
+        ax.set_xlabel(r"$E$ [GeV]")
+        ax.set_title(rf"{smearing} Spectral Densities for different $N_b$")
+        ax.legend()
+
+        plt.show()
+
+    smeared_spectral_densities_plot(
+        n_b_values=n_bs,
+        e_range=e_range,
+        sigma=sigma[1],
+        smearing="Unsmeared",
+    )

@@ -9,8 +9,9 @@ class TrainingSet:
         energies: list,
         n_b: int,
         n_ch_nodes: int,
-        sigma: float,
+        sigma: float | tuple,
         lattice_data: np.ndarray,
+        seed: int,
     ) -> None:
         self.energies = energies
         self.e_max = energies[-1]
@@ -28,8 +29,8 @@ class TrainingSet:
         # self.rho = n_rho # number of random spectral densities.
 
         # deterministic RNG per instance
-        self.rng = np.random.default_rng(seed=n_b)  # MIGHT NEED CHANGING
-        self.e_0 = 0.8  # random.uniform(0.2, 1.3)  # GeV
+        self.rng = np.random.default_rng(seed=seed)  # MIGHT NEED CHANGING
+        self.e_0 = 0.8  # self.rng.uniform(0.2, 1.3)  # GeV
 
         # precompute once
         self.coeffs = self._random_coefficients()
@@ -152,7 +153,7 @@ class TrainingSet:
         coeffs[1:] = rns[1:] / (np.arange(1, self.n_b) ** (1 + epsilon))
         return coeffs
 
-    def _k_sigma_matrix(self) -> np.ndarray:
+    def _k_sigma_matrix(self, sig) -> np.ndarray:
         """Generate Gaussian smearing kernel.
 
         Returns a matrix of values for the Gaussian smearing kernel.
@@ -169,8 +170,8 @@ class TrainingSet:
         omega = -np.log((1 - self.x_nodes) / 2)[:, None]  # shape (nodes, 1)
         energies = self.energies[None, :]  # shape (1, energies)
 
-        kernel = np.exp(-((energies - omega) ** 2) / (2 * self.sigma**2)) / (
-            self.sigma * (2 * np.pi) ** (1 / 2)
+        kernel = np.exp(-((energies - omega) ** 2) / (2 * sig**2)) / (
+            sig * (2 * np.pi) ** (1 / 2)
         )  # shape (nodes, energies)
         return kernel
 
@@ -208,11 +209,16 @@ class TrainingSet:
 
         return np.array(result)  # shape (n_b, n_E)
 
-    def smeared_spectral_density(self):
-        i_n_matrix = self._integration(self._k_sigma_matrix())
-        smeared_density = self.coeffs @ i_n_matrix  # shape (n_E,)
+    def smeared_spectral_densities(self):
+        i_n_matrix = [
+            self._integration(self._k_sigma_matrix(sig=sigma))
+            for sigma in self.sigma
+        ]
+        smeared_densities = [
+            self.coeffs @ i_n for i_n in i_n_matrix
+        ]  # shape (n_E, n_sigmas)
 
-        return smeared_density
+        return smeared_densities
 
     def noisy_correlator(self):
         j_n_matrix = self._integration(self._b_T_matrix())
@@ -272,12 +278,14 @@ if __name__ == "__main__":
         n_ch_nodes=5000,
         sigma=sigma[0],
         lattice_data=two_pt_data,
+        seed=32,
     )
 
     output = training_sets.noisy_correlator()
 
-    print(output.shape)
-    print((output))
+    # print(output.shape)
+    # print((output))
+    # print(np.mean(two_pt_data, axis=0))
 
     def smeared_spectral_densities_plot(
         n_b_values, e_range, sigma, smearing: Literal["Smeared", "Unsmeared"]
@@ -298,10 +306,11 @@ if __name__ == "__main__":
                 n_ch_nodes=50,
                 sigma=sigma,
                 lattice_data=two_pt_data,
+                seed=n_b,
             )
 
             if smearing == "Smeared":
-                densities = training_sets.input_output_pair()[1]
+                densities = training_sets.smeared_spectral_densities()
                 ax.set_ylabel(r"$\hat{\rho}_\sigma(E)$")
 
             elif smearing == "Unsmeared":
@@ -311,14 +320,55 @@ if __name__ == "__main__":
             ax.plot(e_range, densities, label=rf"$N_b$ = {n_b}")
 
         ax.set_xlabel(r"$E$ [GeV]")
-        ax.set_title(rf"{smearing} Spectral Densities for different $N_b$")
+        ax.set_title(
+            rf"{smearing} Spectral Densities for different $N_b$ ($\sigma = 0.63$GeV, $E_0=0.8$, Seed = $32$)"
+        )
         ax.legend()
 
         plt.show()
 
-    smeared_spectral_densities_plot(
-        n_b_values=n_bs,
-        e_range=e_range,
-        sigma=sigma[1],
-        smearing="Unsmeared",
+    def generate_pairs(
+        n_rho: int,
+        n_b: int,
+        energies: np.ndarray,
+        n_ch_nodes: int,
+        sigma: tuple,
+        lattice_data: np.ndarray,
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+
+        pairs = []
+        for rho_idx in range(n_rho):
+            # Seed is unique per (n_b, rho_idx) but fully deterministic.
+            # Multiplier 1e6 keeps seeds well-separated across n_b values.
+            seed = n_b * 1e6 + rho_idx
+
+            ts = TrainingSet(
+                energies=energies,
+                n_b=n_b,
+                n_ch_nodes=n_ch_nodes,
+                sigma=sigma,
+                lattice_data=lattice_data,
+                seed=int(seed),
+            )
+            pairs.append(
+                (ts.noisy_correlator(), ts.smeared_spectral_densities())
+            )
+
+        return pairs
+
+    pairs = generate_pairs(
+        n_rho=int(3),
+        n_b=32,
+        energies=e_range,
+        n_ch_nodes=5000,
+        sigma=sigma,
+        lattice_data=two_pt_data,
     )
+    correlators = np.array([p[0] for p in pairs])  # shape (n_rho, n_t)
+    densities = np.array([p[1] for p in pairs])
+    print(correlators)
+    print(correlators.shape)
+    print(densities)
+    print(densities.shape)
+
+# Random C(t)s are nearly all -ve. Suggests something is wrong.

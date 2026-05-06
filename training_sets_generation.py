@@ -3,7 +3,7 @@ from numpy.typing import ArrayLike
 import numpy as np
 
 
-class TrainingSets:
+class TrainingSet:
     def __init__(
         self,
         energies: list,
@@ -183,57 +183,49 @@ class TrainingSets:
         )
         return basis  # shape (nodes, times)
 
-    def _matrix_integration(self):
+    def _integration(self, function):
 
-        k_sigma = self._k_sigma_matrix()
-        b_T = self._b_T_matrix()
+        prefactor = (
+            (self.exp_map_max() - self.exp_map_min())
+            * np.sqrt(1 - self.nodes**2)
+            / (2 * (1 - self.x_nodes))
+        )[
+            :, None
+        ]  # shape (nodes, 1)
 
-        def integration(function):
+        weighted_kernel = prefactor * function  # shape (nodes, energies)
 
-            prefactor = (
-                (self.exp_map_max() - self.exp_map_min())
-                * np.sqrt(1 - self.nodes**2)
-                / (2 * (1 - self.x_nodes))
-            )[
-                :, None
-            ]  # shape (nodes, 1)
+        result = []
 
-            weighted_kernel = prefactor * function  # shape (nodes, energies)
+        for n in range(self.n_b):
+            Tn_nodes = self.t_n(n)(self.x_nodes)[:, None]  # (nodes, 1)
+            Tn_min = self.t_n(n)(self.exp_map_min())
 
-            result = []
+            term = weighted_kernel * (Tn_nodes - Tn_min)
+            i_n = (np.pi / self.n_ch_nodes) * term.sum(axis=0)
 
-            for n in range(self.n_b):
-                Tn_nodes = self.t_n(n)(self.x_nodes)[:, None]  # (nodes, 1)
-                Tn_min = self.t_n(n)(self.exp_map_min())
+            result.append(i_n)
 
-                term = weighted_kernel * (Tn_nodes - Tn_min)
-                i_n = (np.pi / self.n_ch_nodes) * term.sum(axis=0)
+        return np.array(result)  # shape (n_b, n_E)
 
-                result.append(i_n)
+    def smeared_spectral_density(self):
+        i_n_matrix = self._integration(self._k_sigma_matrix())
+        smeared_density = self.coeffs @ i_n_matrix  # shape (n_E,)
 
-            return np.array(result)  # shape (n_b, n_E)
+        return smeared_density
 
-        i_n_matrix = integration(k_sigma)
-        j_n_matrix = integration(b_T)
-
-        return i_n_matrix, j_n_matrix
-
-    def input_output_pair(self):
-        smeared_density = (
-            self.coeffs @ self._matrix_integration()[0]
-        )  # shape (n_E,)
-        correlator = (
-            self.coeffs @ self._matrix_integration()[1]
-        )  # shape (n_t,)
+    def noisy_correlator(self):
+        j_n_matrix = self._integration(self._b_T_matrix())
+        correlator = self.coeffs @ j_n_matrix  # shape (n_t,)
 
         # ---- Add in noise ----
         normalisation = (
             correlator[0] / np.mean(self.lattice_data, axis=0)[0]
         ) ** 2
         covariance = normalisation * self.cov_mat
-        noisy_correlator = self.rng.multivariate_normal(correlator, covariance)
+        noisy_corr = self.rng.multivariate_normal(correlator, covariance)
 
-        return noisy_correlator, smeared_density
+        return noisy_corr
 
     def spectral_densities(self):
         mapped_Es = self.exp_map(self.energies)
@@ -274,7 +266,7 @@ if __name__ == "__main__":
     n_rhos = [50e3, 100e3, 200e3, 400e3, 800e3]
     n_bs = [16, 32, 128, 512]
 
-    training_sets = TrainingSets(
+    training_sets = TrainingSet(
         energies=e_range,
         n_b=32,
         n_ch_nodes=5000,
@@ -282,7 +274,7 @@ if __name__ == "__main__":
         lattice_data=two_pt_data,
     )
 
-    output = training_sets.input_output_pair()[0]
+    output = training_sets.noisy_correlator()
 
     print(output.shape)
     print((output))
@@ -300,7 +292,7 @@ if __name__ == "__main__":
         fig, ax = plt.subplots()
 
         for n_b in n_b_values:
-            training_sets = TrainingSets(
+            training_sets = TrainingSet(
                 energies=e_range,
                 n_b=n_b,
                 n_ch_nodes=50,

@@ -98,3 +98,5 @@ target/
 
 *.npy
 *.dat
+
+sandbox*.py

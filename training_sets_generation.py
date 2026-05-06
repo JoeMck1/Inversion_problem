@@ -5,7 +5,12 @@ import numpy as np
 
 class TrainingSets:
     def __init__(
-        self, energies: list, n_b: int, n_ch_nodes: int, sigma: float, n_t
+        self,
+        energies: list,
+        n_b: int,
+        n_ch_nodes: int,
+        sigma: float,
+        lattice_data: np.ndarray,
     ) -> None:
         self.energies = energies
         self.e_max = energies[-1]
@@ -13,7 +18,10 @@ class TrainingSets:
         self.n_b = n_b  # number of basis functions.
         self.n_ch_nodes = n_ch_nodes  # number of Chebyshev nodes.
         self.sigma = sigma  # sigma is a 'resolution parameter'.
-        self.n_t = n_t  # number of time-slices
+
+        self.lattice_data = lattice_data  # shape (bootstraps, time-slices)
+        self.cov_mat = np.cov(self.lattice_data, rowvar=False, bias=False)
+        self.n_t = len(self.lattice_data[0])  # number of time-slices
 
         self.time_slices = np.arange(1, self.n_t + 1)
 
@@ -122,7 +130,7 @@ class TrainingSets:
         -------
         nodes: ndarray
             An array of Chebyshev nodes, given by:
-            x_i = cos(\pi(2i -1)/2N), where N is the number of
+            x_i = cos(pi(2i -1)/2N), where N is the number of
             Chebyshev nodes. We are free to choose this number.
         """
 
@@ -158,20 +166,20 @@ class TrainingSets:
             A 2-dimensional array of shape
             (number of Chebyshev nodes, number of energies).
         """
-        omega = np.log((1 - self.x_nodes) / 2)[:, None]  # shape (nodes, 1)
+        omega = -np.log((1 - self.x_nodes) / 2)[:, None]  # shape (nodes, 1)
         energies = self.energies[None, :]  # shape (1, energies)
 
-        kernel = np.exp(-((energies + omega) ** 2) / (2 * self.sigma**2)) / (
+        kernel = np.exp(-((energies - omega) ** 2) / (2 * self.sigma**2)) / (
             self.sigma * (2 * np.pi) ** (1 / 2)
         )  # shape (nodes, energies)
         return kernel
 
     def _b_T_matrix(self):
-        omega = np.log((1 - self.x_nodes) / 2)[:, None]  # shape (nodes, 1)
+        omega = -np.log((1 - self.x_nodes) / 2)[:, None]  # shape (nodes, 1)
         times = self.time_slices[None, :]  # shape (1, times)
 
         basis = ((omega**2) / (12 * np.pi**2)) * (
-            np.exp(-omega @ times) + np.exp(-omega @ (self.n_t - times))
+            np.exp(-omega * times) + np.exp(-omega * (self.n_t - times))
         )
         return basis  # shape (nodes, times)
 
@@ -210,11 +218,7 @@ class TrainingSets:
 
         return i_n_matrix, j_n_matrix
 
-    def bare_input_output_pair(self):
-        """Returns (C, \hat{rho}), not (C_noisy, \hat{rho}), hence the
-        label 'bare'.
-        """
-
+    def input_output_pair(self):
         smeared_density = (
             self.coeffs @ self._matrix_integration()[0]
         )  # shape (n_E,)
@@ -222,7 +226,14 @@ class TrainingSets:
             self.coeffs @ self._matrix_integration()[1]
         )  # shape (n_t,)
 
-        return smeared_density, correlator
+        # ---- Add in noise ----
+        normalisation = (
+            correlator[0] / np.mean(self.lattice_data, axis=0)[0]
+        ) ** 2
+        covariance = normalisation * self.cov_mat
+        noisy_correlator = self.rng.multivariate_normal(correlator, covariance)
+
+        return noisy_correlator, smeared_density
 
     def spectral_densities(self):
         mapped_Es = self.exp_map(self.energies)
@@ -251,6 +262,9 @@ if __name__ == "__main__":
     e_max, e_min = 24 * muon_mass, muon_mass
     e_range = np.linspace(e_min, e_max, 47)
 
+    # lattice data from the 64 ensemble for the 2pi.g5.001 operator
+    two_pt_data = np.load("2pt_data_64.npy")
+
     sigma = [0.44, 0.63]  # GeV
 
     # The n_rho and n_b values used to define the training sets in the
@@ -261,13 +275,17 @@ if __name__ == "__main__":
     n_bs = [16, 32, 128, 512]
 
     training_sets = TrainingSets(
-        energies=e_range, n_b=32, n_ch_nodes=10, sigma=sigma[0], n_t=15
+        energies=e_range,
+        n_b=32,
+        n_ch_nodes=5000,
+        sigma=sigma[0],
+        lattice_data=two_pt_data,
     )
 
-    output = training_sets.bare_input_output_pair()[1]
+    output = training_sets.input_output_pair()[0]
 
     print(output.shape)
-    print(type(output))
+    print((output))
 
     def smeared_spectral_densities_plot(
         n_b_values, e_range, sigma, smearing: Literal["Smeared", "Unsmeared"]
@@ -283,11 +301,15 @@ if __name__ == "__main__":
 
         for n_b in n_b_values:
             training_sets = TrainingSets(
-                energies=e_range, n_b=n_b, n_ch_nodes=50, sigma=sigma, n_t=15
+                energies=e_range,
+                n_b=n_b,
+                n_ch_nodes=50,
+                sigma=sigma,
+                lattice_data=two_pt_data,
             )
 
             if smearing == "Smeared":
-                densities = training_sets.bare_input_output_pair()[0]
+                densities = training_sets.input_output_pair()[1]
                 ax.set_ylabel(r"$\hat{\rho}_\sigma(E)$")
 
             elif smearing == "Unsmeared":

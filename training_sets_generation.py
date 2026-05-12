@@ -167,24 +167,29 @@ class TrainingSet:
             A 2-dimensional array of shape
             (number of Chebyshev nodes, number of energies).
         """
-        omega = -np.log((1 - self.x_nodes) / 2)[:, None]  # shape (nodes, 1)
-        energies = self.energies[None, :]  # shape (1, energies)
+        omega = -np.log((1 - self.x_nodes) / 2)[
+            :, None
+        ]  # shape (n_ch_nodes, 1)
+        energies = self.energies[None, :]  # shape (1, n_E)
 
         kernel = np.exp(-((energies - omega) ** 2) / (2 * sig**2)) / (
             sig * (2 * np.pi) ** (1 / 2)
-        )  # shape (nodes, energies)
+        )  # shape (n_ch_nodes, n_E)
         return kernel
 
     def _b_T_matrix(self):
-        omega = -np.log((1 - self.x_nodes) / 2)[:, None]  # shape (nodes, 1)
-        times = self.time_slices[None, :]  # shape (1, times)
+        omega = -np.log((1 - self.x_nodes) / 2)[
+            :, None
+        ]  # shape (n_ch_nodes, 1)
+        times = self.time_slices[None, :]  # shape (1, n_T)
 
         basis = ((omega**2) / (12 * np.pi**2)) * (
             np.exp(-omega * times) + np.exp(-omega * (self.n_t - times))
         )
-        return basis  # shape (nodes, times)
+        return basis  # shape (n_ch_nodes, n_T)
 
     def _integration(self, function):
+        """function = smearing kernel or basis function b_T."""
 
         prefactor = (
             (self.exp_map_max() - self.exp_map_min())
@@ -192,14 +197,14 @@ class TrainingSet:
             / (2 * (1 - self.x_nodes))
         )[
             :, None
-        ]  # shape (nodes, 1)
+        ]  # shape (n_ch_nodes, 1)
 
-        weighted_kernel = prefactor * function  # shape (nodes, energies)
+        weighted_kernel = prefactor * function  # shape (n_ch_nodes, n_E)
 
         result = []
 
         for n in range(self.n_b):
-            Tn_nodes = self.t_n(n)(self.x_nodes)[:, None]  # (nodes, 1)
+            Tn_nodes = self.t_n(n)(self.x_nodes)[:, None]  # (n_ch_nodes, 1)
             Tn_min = self.t_n(n)(self.exp_map_min())
 
             term = weighted_kernel * (Tn_nodes - Tn_min)
@@ -207,7 +212,7 @@ class TrainingSet:
 
             result.append(i_n)
 
-        return np.array(result)  # shape (n_b, n_E)
+        return np.array(result)  # shape (n_b, n_E or n_T)
 
     def smeared_spectral_densities(self):
         i_n_matrix = [
@@ -228,6 +233,9 @@ class TrainingSet:
         normalisation = (
             correlator[0] / np.mean(self.lattice_data, axis=0)[0]
         ) ** 2
+        print(
+            correlator[0], np.mean(self.lattice_data, axis=0)[0], normalisation
+        )
         covariance = normalisation * self.cov_mat
         noisy_corr = self.rng.multivariate_normal(correlator, covariance)
 
@@ -281,7 +289,7 @@ if __name__ == "__main__":
         seed=32,
     )
 
-    output = training_sets.noisy_correlator()
+    # output = training_sets.noisy_correlator()
 
     # print(output.shape)
     # print((output))
@@ -358,7 +366,7 @@ if __name__ == "__main__":
 
     pairs = generate_pairs(
         n_rho=int(3),
-        n_b=32,
+        n_b=512,
         energies=e_range,
         n_ch_nodes=5000,
         sigma=sigma,
@@ -366,9 +374,7 @@ if __name__ == "__main__":
     )
     correlators = np.array([p[0] for p in pairs])  # shape (n_rho, n_t)
     densities = np.array([p[1] for p in pairs])
-    print(correlators)
+    # print(correlators)
     print(correlators.shape)
-    print(densities)
+    # print(densities)
     print(densities.shape)
-
-# Random C(t)s are nearly all -ve. Suggests something is wrong.

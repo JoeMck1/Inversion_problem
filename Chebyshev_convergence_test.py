@@ -95,10 +95,10 @@ def compute_J_n(n, t_tau, M):
 
 # ── Convergence test ──────────────────────────────────────────────────────────
 M_values = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
-M_ref = 10000  # reference value treated as "exact"
+M_ref = 100000  # reference value treated as "exact"
 
 # Representative test cases
-test_ns = [1, 32, 128, 512]  # basis function indices
+test_ns = [16, 32, 128, 512]  # basis function indices
 test_E_js = [0.11, 1.25, 2.53]  # output energies in GeV
 test_t_taus = [1, 16, 32, 64]  # time slices (small, mid, large t)
 
@@ -127,7 +127,7 @@ LINE_STYLES = ["-", "--", ":", "-."]
 MARKERS = ["o", "s", "^", "x"]
 
 fig = plt.figure(figsize=(16, 12))
-fig.patch.set_facecolor("#0f0f0f")
+fig.patch.set_facecolor("white")
 gs = gridspec.GridSpec(
     2,
     2,
@@ -150,27 +150,27 @@ axes = [fig.add_subplot(gs[i // 2, i % 2]) for i in range(4)]
 
 
 def style_ax(ax, title, xlabel, ylabel):
-    ax.set_facecolor("#1a1a1a")
-    ax.set_title(title, color="white", fontsize=11, pad=8)
-    ax.set_xlabel(xlabel, color="#aaaaaa", fontsize=9)
-    ax.set_ylabel(ylabel, color="#aaaaaa", fontsize=9)
-    ax.tick_params(colors="#aaaaaa", labelsize=8)
+    ax.set_facecolor("white")
+    ax.set_title(title, color="black", fontsize=11, pad=8)
+    ax.set_xlabel(xlabel, color="#444444", fontsize=9)
+    ax.set_ylabel(ylabel, color="#444444", fontsize=9)
+    ax.tick_params(colors="#444444", labelsize=8)
     for spine in ax.spines.values():
-        spine.set_edgecolor("#333333")
+        spine.set_edgecolor("#bbbbbb")
     ax.set_yscale("log")
     ax.set_xscale("log", base=2)
     ax.set_xticks(M_values)
     ax.set_xticklabels([str(m) for m in M_values], fontsize=7)
-    ax.yaxis.grid(True, color="#2a2a2a", linewidth=0.5)
-    ax.xaxis.grid(True, color="#2a2a2a", linewidth=0.5)
+    ax.yaxis.grid(True, color="#dddddd", linewidth=0.5)
+    ax.xaxis.grid(True, color="#dddddd", linewidth=0.5)
     ax.set_axisbelow(True)
     ax.axhline(
-        1e-6,
-        color="#ff6b6b",
+        1e-7,
+        color="#cc3333",
         linewidth=0.8,
         linestyle="--",
         alpha=0.6,
-        label=r"$10^{-6}$ threshold",
+        label=r"$10^{-7}$ threshold",
     )
 
 
@@ -201,9 +201,9 @@ for panel_idx, sigma in enumerate(SIGMAS):
         handles,
         labels,
         fontsize=6.5,
-        facecolor="#111111",
-        edgecolor="#444444",
-        labelcolor="white",
+        facecolor="white",
+        edgecolor="#bbbbbb",
+        labelcolor="black",
         ncol=2,
         loc="lower left",
     )
@@ -228,9 +228,9 @@ for ti, t_tau in enumerate(test_t_taus):
     )
 ax.legend(
     fontsize=7.5,
-    facecolor="#111111",
-    edgecolor="#444444",
-    labelcolor="white",
+    facecolor="white",
+    edgecolor="#bbbbbb",
+    labelcolor="black",
     loc="lower left",
 )
 
@@ -253,25 +253,25 @@ for ni, n in enumerate(test_ns):
     )
 ax.legend(
     fontsize=7.5,
-    facecolor="#111111",
-    edgecolor="#444444",
-    labelcolor="white",
+    facecolor="white",
+    edgecolor="#bbbbbb",
+    labelcolor="black",
     loc="lower left",
 )
 
 fig.suptitle(
     "Gauss–Chebyshev Quadrature Convergence\n"
     r"$I_n(E_j) = \int K_\sigma B_n\,d\omega$ and $J_n(t_\tau) = \int b_T B_n\,d\omega$",
-    color="white",
+    color="black",
     fontsize=13,
     y=0.97,
 )
 
 plt.savefig(
-    "/home/joe/work/Inversion_problem/convergence_test.png",
+    "/home/joe/work/Inversion_problem/Plots/convergence_test.png",
     dpi=150,
     bbox_inches="tight",
-    facecolor="#0f0f0f",
+    facecolor="white",
 )
 plt.close()
 print("Saved convergence_test.png")

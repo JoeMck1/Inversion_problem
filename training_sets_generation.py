@@ -145,7 +145,7 @@ class TrainingSet:
         return nodes
 
     def _random_coefficients(self):
-        epsilon = 10e-7
+        epsilon = 1e-7
         rns = self.rng.uniform(-1, 1, size=self.n_b)  # use seeded rng
 
         coeffs = np.empty(self.n_b)
@@ -195,9 +195,8 @@ class TrainingSet:
             (self.exp_map_max() - self.exp_map_min())
             * np.sqrt(1 - self.nodes**2)
             / (2 * (1 - self.x_nodes))
-        )[
-            :, None
-        ]  # shape (n_ch_nodes, 1)
+        )[:, None]
+        # prefactor shape (n_ch_nodes, 1)
 
         weighted_kernel = prefactor * function  # shape (n_ch_nodes, n_E)
 

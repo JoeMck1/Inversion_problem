@@ -154,7 +154,25 @@ class SpectralNet(nn.Module):
         self._initialise_weights(std=0.2236)
 
     def _initialise_weights(self, std: float):
-        """Apply Gaussian weight initialisation to all Linear and Conv1d layers."""
+        """Gaussian weight initialisation to Linear and Conv1d layers.
+
+        self.modules() is a method inherited from nn.Module. It returns
+        an iterator over every submodule in the network e.g.
+        Sequential, Conv1d, Linear, LeakyReLU, and self itself.
+
+        isinstance(..., (Linear, Conv1d)) returns true for the Linear
+        and Conv1d submodules. We want this as these are the only
+        layers with learnable weights.
+
+        nn.init.normal_(module.weight, ...) initialises the weights by
+        drawing the from a normal distribution. This replaces PyTorch's
+        default Kaiming initialisation. module.weight is a tensor of
+        containing the learnable weights for that layer.
+
+        module.bias is a tensor containing the biases for the layer.
+        Not every layer needs biases, so the last if statement checks
+        this first. nn.init.zeros_ then initialises the biases to zero.
+        """
         for module in self.modules():
             if isinstance(module, (nn.Linear, nn.Conv1d)):
                 nn.init.normal_(module.weight, mean=0.0, std=std)
@@ -228,7 +246,19 @@ def arcL(input_size: int = 64, output_size: int = 47) -> SpectralNet:
 
 
 def count_parameters(model: nn.Module) -> int:
-    """Count the total number of trainable parameters in a model."""
+    """Count the total number of trainable parameters in a model.
+
+    model.parameters() returns an iterator over every learnable
+    parameter tensor in the network (all weight matrices and bias
+    vectors).
+
+    p.requires_grad evaluates True by default for all learnable
+    parameters, and False for any tensors which may have been
+    explicitly forzen. The if statement checks this.
+
+    p.numel() returns the number of scalars (i.e. elements) in a
+    tensor.
+    """
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 

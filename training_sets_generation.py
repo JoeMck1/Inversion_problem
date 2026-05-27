@@ -33,6 +33,7 @@ class TrainingSet:
         self.sigma = sigma  # smearing parameter.
 
         self.lattice_data = lattice_data  # shape (bootstraps, time-slices)
+        self.lattice_mean = np.mean(self.lattice_data, axis=0)
         self.cov_mat = np.cov(self.lattice_data, rowvar=False, bias=False)
         self.n_t = self.lattice_data.shape[1]
         self.time_slices = np.arange(1, self.n_t + 1)
@@ -45,6 +46,13 @@ class TrainingSet:
         self.coeffs = self._random_coefficients()
         self.nodes = self._chebyshev_nodes()
         self.x_nodes = self._mapped_chebyshev_nodes(self.nodes)
+
+        self._T_matrix = np.array(
+            [self.t_n(n)(self.x_nodes) for n in range(self.n_b)]
+        )  # shape (n_b, n_ch_nodes)
+        self._T_min = np.array(
+            [self.t_n(n)(self.exp_map_min()) for n in range(self.n_b)]
+        )  # shape (n_b,)
         pass
 
     # ── static helpers ──────────────────────────────────────────────────────
@@ -111,18 +119,12 @@ class TrainingSet:
             (self.exp_map_max() - self.exp_map_min())
             * np.sqrt(1 - self.nodes**2)
             / (2 * (1 - self.x_nodes))
-        )[:, None]
-        # prefactor shape (n_ch_nodes, 1)
+        )  # prefactor shape (n_ch_nodes, 1)
 
-        weighted = prefactor * function  # shape (n_ch_nodes, n_E)
+        weighted = prefactor[:, None] * function  # (n_ch_nodes, n_E or n_T)
 
-        result = np.empty((self.n_b, weighted.shape[1]))
-
-        for n in range(self.n_b):
-            Tn_nodes = self.t_n(n)(self.x_nodes)[:, None]  # (n_ch_nodes, 1)
-            Tn_min = self.t_n(n)(self.exp_map_min())
-            term = weighted * (Tn_nodes - Tn_min)
-            result[n] = (np.pi / self.n_ch_nodes) * term.sum(axis=0)
+        T_shifted = self._T_matrix - self._T_min[:, None]
+        result = (np.pi / self.n_ch_nodes) * T_shifted @ weighted
 
         return result  # shape (n_b, n_E or n_T)
 
@@ -139,9 +141,7 @@ class TrainingSet:
         correlator = self.coeffs @ j_n_matrix  # shape (n_t,)
 
         # Add in noise
-        normalisation = (
-            correlator[0] / np.mean(self.lattice_data, axis=0)[0]
-        ) ** 2
+        normalisation = (correlator[0] / self.lattice_mean[0]) ** 2
 
         covariance = normalisation * self.cov_mat
         noisy_corr = self.rng.multivariate_normal(correlator, covariance)

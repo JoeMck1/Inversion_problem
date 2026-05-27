@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from typing import Callable, Literal
+from typing import Literal
 
 import h5py
 import numpy as np
@@ -47,12 +47,15 @@ class TrainingSet:
         self.nodes = self._chebyshev_nodes()
         self.x_nodes = self._mapped_chebyshev_nodes(self.nodes)
 
-        self._T_matrix = np.array(
-            [self.t_n(n)(self.x_nodes) for n in range(self.n_b)]
-        )  # shape (n_b, n_ch_nodes)
-        self._T_min = np.array(
-            [self.t_n(n)(self.exp_map_min()) for n in range(self.n_b)]
-        )  # shape (n_b,)
+        # self._T_matrix shape (n_b, n_ch_nodes)
+        # self._T_min shape (n_b,)
+
+        self._T_matrix = np.polynomial.chebyshev.chebvander(
+            self.x_nodes, self.n_b - 1
+        ).T
+        self._T_min = np.polynomial.chebyshev.chebvander(
+            [self.exp_map_min()], self.n_b - 1
+        ).T[:, 0]
         pass
 
     # ── static helpers ──────────────────────────────────────────────────────
@@ -66,10 +69,6 @@ class TrainingSet:
 
     def exp_map_min(self) -> np.floating:
         return self.exp_map(self.e_0)
-
-    @staticmethod
-    def t_n(n: int) -> Callable:
-        return np.polynomial.chebyshev.Chebyshev.basis(n)
 
     # ── private helpers ────────────────────────────────────────────────────
 
@@ -148,20 +147,22 @@ class TrainingSet:
 
         return noisy_corr  # shape (n_t,)
 
-    def spectral_densities(self) -> list[float]:
-        mapped_Es = self.exp_map(self.energies)
+    def spectral_densities(self) -> np.ndarray:
+        mapped_Es = self.exp_map(self.energies)  # (n_E,)
         x_min = self.exp_map_min()
-        densities = []
-        for e in mapped_Es:
-            if e <= x_min:
-                densities.append(0.0)
-                continue
-            val = sum(
-                self.coeffs[n] * (self.t_n(n + 1)(e) - self.t_n(n + 1)(x_min))
-                for n in range(self.n_b)
-            )
 
-            densities.append(float(val))
+        T_e = np.polynomial.chebyshev.chebvander(
+            mapped_Es, self.n_b
+        ).T  # (n_b+1, n_E)
+        T_xmin = np.polynomial.chebyshev.chebvander(
+            np.array([x_min]), self.n_b
+        ).T  # (n_b+1, 1)
+
+        diff = T_e[1:] - T_xmin[1:]  # (n_b, n_E)
+        densities = self.coeffs @ diff  # (n_E,)
+
+        # Zero out energies below the threshold
+        densities[mapped_Es <= x_min] = 0.0
 
         return densities
 

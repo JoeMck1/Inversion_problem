@@ -9,9 +9,9 @@ Tests convergence of:
 as a function of the number of Gauss-Chebyshev quadrature nodes M.
 """
 
-import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
+import numpy as np
 from scipy.special import eval_chebyt
 
 # ── Physical constants ────────────────────────────────────────────────────────
@@ -20,7 +20,6 @@ E_MIN = M_MU  # output grid minimum
 E_MAX = 24 * M_MU  # output grid maximum (~2.536 GeV)
 E0 = 0.5  # representative threshold in GeV
 T_LAT = 64  # temporal extent in lattice units
-A = 1.0  # lattice spacing (working in units where a=1 here)
 SIGMAS = [0.44, 0.63]  # smearing widths in GeV
 
 
@@ -68,9 +67,8 @@ def gauss_chebyshev_nodes_weights(M):
     """
     i = np.arange(1, M + 1)
     u_nodes = np.cos(np.pi * (2 * i - 1) / (2 * M))  # nodes in [-1,1]
-    x_nodes = x_min + (u_nodes + 1) / 2 * (
-        x_max - x_min
-    )  # nodes in [x_min, x_max]
+    x_nodes = x_min + (u_nodes + 1) / 2 * (x_max - x_min)
+    # nodes in [x_min, x_max]
     E_nodes = E_of_x(x_nodes)  # nodes in [E0, E_MAX]
     jacobian = (x_max - x_min) / (2 * (1 - x_nodes))  # dx/du * dE/dx = dE/du
     sqrt_factor = np.sqrt(1 - u_nodes**2)  # absorb Chebyshev weight
@@ -98,7 +96,7 @@ M_values = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
 M_ref = 100000  # reference value treated as "exact"
 
 # Representative test cases
-test_ns = [16, 32, 128, 512]  # basis function indices
+test_ns = [1, 32, 128, 512]  # basis function indices
 test_E_js = [0.11, 1.25, 2.53]  # output energies in GeV
 test_t_taus = [1, 16, 32, 64]  # time slices (small, mid, large t)
 
@@ -125,6 +123,7 @@ for n in test_ns:
 COLORS = plt.cm.viridis(np.linspace(0.15, 0.85, len(test_ns)))
 LINE_STYLES = ["-", "--", ":", "-."]
 MARKERS = ["o", "s", "^", "x"]
+THRESHOLD = 1e-6
 
 fig = plt.figure(figsize=(16, 12))
 fig.patch.set_facecolor("white")
@@ -165,12 +164,12 @@ def style_ax(ax, title, xlabel, ylabel):
     ax.xaxis.grid(True, color="#dddddd", linewidth=0.5)
     ax.set_axisbelow(True)
     ax.axhline(
-        1e-7,
+        THRESHOLD,
         color="#cc3333",
         linewidth=0.8,
         linestyle="--",
         alpha=0.6,
-        label=r"$10^{-7}$ threshold",
+        label=r"$10^{-6}$ threshold",
     )
 
 
@@ -268,7 +267,7 @@ fig.suptitle(
 )
 
 plt.savefig(
-    "/home/joe/work/Inversion_problem/Plots/convergence_test.png",
+    "/home/joe/work/Inversion_problem/Plots/convergence_test_n1.png",
     dpi=150,
     bbox_inches="tight",
     facecolor="white",

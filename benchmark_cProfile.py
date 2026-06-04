@@ -3,7 +3,7 @@ import cProfile
 
 import numpy as np
 
-from training_sets_generation import generate_all_training_sets
+from TrainingSets_Quadrature import generate_all_training_sets
 
 two_pt_data = np.load("2pt_data_64.npy")
 muon_mass = 0.10566

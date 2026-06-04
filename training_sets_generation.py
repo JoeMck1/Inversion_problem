@@ -47,22 +47,24 @@ class TrainingSet:
         self.nodes = self._chebyshev_nodes()
         self.x_nodes = self._mapped_chebyshev_nodes(self.nodes)
 
-        # self._T_matrix shape (n_b, n_ch_nodes)
-        # self._T_min shape (n_b,)
+        # self._T_matrix shape (n_b + 1, n_ch_nodes)
+        # self._T_min shape (n_b + 1,)
+        # Generate n_b + 1 as \rho is defined for n = 0 to n = n_b,
+        # i.e. a total of n_b + 1 terms.
 
         self._T_matrix = np.polynomial.chebyshev.chebvander(
-            self.x_nodes, self.n_b - 1
+            self.x_nodes, self.n_b
         ).T
         self._T_min = np.polynomial.chebyshev.chebvander(
-            [self.exp_map_min()], self.n_b - 1
-        ).T[:, 0]
+            [self.exp_map_min()], self.n_b
+        )[0, :]
         pass
 
     # ── static helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def exp_map(e: ArrayLike) -> np.ndarray:
-        return 1 - 2 * np.exp(-np.asarray(e))
+    def exp_map(E: ArrayLike) -> np.ndarray:
+        return 1 - 2 * np.exp(-np.asarray(E))
 
     def exp_map_max(self) -> np.floating:
         return self.exp_map(self.e_max)
@@ -88,10 +90,10 @@ class TrainingSet:
 
     def _random_coefficients(self):
         epsilon = 1e-7
-        rns = self.rng.uniform(-1, 1, size=self.n_b)  # use seeded rng
-        coeffs = np.empty(self.n_b)
+        rns = self.rng.uniform(-1, 1, size=self.n_b + 1)  # use seeded rng
+        coeffs = np.empty(self.n_b + 1)
         coeffs[0] = rns[0]
-        coeffs[1:] = rns[1:] / (np.arange(1, self.n_b) ** (1 + epsilon))
+        coeffs[1:] = rns[1:] / (np.arange(1, self.n_b + 1) ** (1 + epsilon))
         return coeffs
 
     def _k_sigma_matrix(self, sig) -> np.ndarray:
@@ -125,7 +127,7 @@ class TrainingSet:
         T_shifted = self._T_matrix - self._T_min[:, None]
         result = (np.pi / self.n_ch_nodes) * T_shifted @ weighted
 
-        return result  # shape (n_b, n_E or n_T)
+        return result  # shape (n_b + 1, n_E or n_T)
 
     # ── public methods ─────────────────────────────────────────────────────
 
@@ -151,14 +153,15 @@ class TrainingSet:
         mapped_Es = self.exp_map(self.energies)  # (n_E,)
         x_min = self.exp_map_min()
 
-        T_e = np.polynomial.chebyshev.chebvander(
-            mapped_Es, self.n_b
-        ).T  # (n_b+1, n_E)
+        # T_E (n_b+1, n_E)
+        # T_xmin (n_b + 1,)
+
+        T_E = np.polynomial.chebyshev.chebvander(mapped_Es, self.n_b).T
         T_xmin = np.polynomial.chebyshev.chebvander(
             np.array([x_min]), self.n_b
-        ).T  # (n_b+1, 1)
+        )[0, :]
 
-        diff = T_e[1:] - T_xmin[1:]  # (n_b, n_E)
+        diff = T_E - T_xmin[:, None]  # (n_b + 1, n_E)
         densities = self.coeffs @ diff  # (n_E,)
 
         # Zero out energies below the threshold
@@ -478,13 +481,32 @@ if __name__ == "__main__":
 
         plt.show()
 
-    generate_all_training_sets(
-        lattice_data=two_pt_data,
-        energies=e_range,
-        sigmas=sigma,
-        n_b_values=n_bs,
-        n_rho_values=n_rhos,
-        n_ch_nodes=1024,  # adjust based on your convergence test
-        output_dir="training_sets",
-        overwrite=False,
-    )
+    ch_nodes = [200_000, 400_000]
+    corrs = []
+    for x in ch_nodes:
+        ts = TrainingSet(
+            energies=e_range,
+            n_b=n_bs[-1],
+            n_ch_nodes=x,
+            sigma=sigma,
+            lattice_data=two_pt_data,
+            seed=1,
+        )
+        corrs.append(ts.noisy_correlator())
+
+        print()
+        print(f"quadrature, nodes = {x}")
+        print(ts.noisy_correlator())
+
+    # print(abs(corrs[1] - corrs[0]))
+
+    # generate_all_training_sets(
+    #    lattice_data=two_pt_data,
+    #    energies=e_range,
+    #    sigmas=sigma,
+    #    n_b_values=n_bs,
+    #    n_rho_values=n_rhos,
+    #    n_ch_nodes=2048,  # adjust based on your convergence test
+    #    output_dir="training_sets",
+    #    overwrite=False,
+    # )

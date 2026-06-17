@@ -444,8 +444,8 @@ if __name__ == "__main__":
     n_rhos = [50_000, 100_000, 200_000, 400_000, 800_000]
     n_bs = [16, 32, 128, 512]
 
-    # lattice data from the 64 ensemble for the 2pi.g5.001 operator
-    two_pt_data = np.load("2pt_data_64.npy")
+    # lattice data from the 48 ensemble for the 2pi.g5.001 operator
+    two_pt_data = np.load("noise_injection_data/2pt_data_48_unfolded.npy")
 
     ch_nodes = [200_000, 400_000]
     corrs = []

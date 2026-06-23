@@ -4,6 +4,7 @@ import time
 
 import h5py
 import numpy as np
+from scipy.fft import dct
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,7 +25,6 @@ class TrainingSet:
         seed: int,
     ) -> None:
         self.energies = energies
-        self.e_max = energies[-1]
 
         self.n_b = n_b  # number of basis functions.
         self.n_ch_nodes = n_ch_nodes  # number of Chebyshev nodes.
@@ -43,18 +43,6 @@ class TrainingSet:
         # precompute once
         self.coeffs = self._random_coefficients()
         self.nodes = self._chebyshev_nodes()
-
-        # self._T_matrix shape (n_b + 1, n_ch_nodes)
-        # self._T_min shape (n_b + 1,)
-        # Generate n_b + 1 as \rho is defined for n = 0 to n = n_b,
-        # i.e. a total of n_b + 1 terms.
-
-        self._T_matrix = np.polynomial.chebyshev.chebvander(
-            self.nodes, self.n_b
-        ).T
-        self._T_min = np.polynomial.chebyshev.chebvander(
-            [self.x_min()], self.n_b
-        )[0, :]
         pass
 
     # ── static helpers ──────────────────────────────────────────────────────
@@ -130,12 +118,20 @@ class TrainingSet:
         g_xk = (step * weight)[:, None] * function  # IS this right?
         # g_xk shape (n_ch_modes, n_E or n_T)
 
-        F_n = self._T_matrix @ g_xk  # shape (n_b + 1, n_E or n_T)
+        # Generate n_b + 1 as \rho is defined for n = 0 to n = n_b,
+        # i.e. a total of n_b + 1 terms.
+
+        F_n = (
+            dct(g_xk, type=2, axis=0)[: self.n_b + 1, :] / 2
+        )  # shape (n-b + 1, n_E or n_T)
         F_0 = F_n[0, :]  # shape (n_E or n_T,)
         prefactor = np.pi / self.n_ch_nodes
 
+        n_vals = np.arange(self.n_b + 1)
+        T_xmin = np.cos(n_vals * np.arccos(self.x_min()))  # (n_b + 1,)
+
         result = prefactor * (
-            self.coeffs @ (F_n - (self._T_min[:, None] * F_0[None, :]))
+            self.coeffs @ (F_n - (T_xmin[:, None] * F_0[None, :]))
         )
         return result  # shape (n_E, or n_T,)
 
@@ -151,9 +147,18 @@ class TrainingSet:
 
         # Add in noise
         normalisation = (correlator[0] / self.lattice_mean[0]) ** 2
-
         covariance = normalisation * self.cov_mat
         noisy_corr = self.rng.multivariate_normal(correlator, covariance)
+
+        # rel_noise = np.abs(noisy_corr - correlator) / np.abs(correlator)
+        # rel_noise_std = np.sqrt(np.diag(covariance)) / np.abs(correlator)
+
+        # print("relative noise min")
+        # print(sorted(rel_noise)[:3])
+        # print()
+        # print("relative noise std min")
+        # print(sorted(rel_noise_std)[:3])
+
         return noisy_corr  # shape (n_t,)
 
     def spectral_densities(self) -> np.ndarray:
@@ -447,7 +452,7 @@ if __name__ == "__main__":
     # lattice data from the 48 ensemble for the 2pi.g5.001 operator
     two_pt_data = np.load("noise_injection_data/2pt_data_48_unfolded.npy")
 
-    ch_nodes = [200_000, 400_000]
+    ch_nodes = [4096]
     corrs = []
     for x in ch_nodes:
         ts = TrainingSet(
@@ -460,10 +465,10 @@ if __name__ == "__main__":
         )
         corrs.append(ts.noisy_correlator())
 
-        print()
-        print(f"full cheb, nodes = {x}")
-        print(ts.noisy_correlator())
-        # print(ts._b_T_matrix()[:, -1])
-        print(ts._random_coefficients().shape)
+        print(ts._integration(ts._k_sigma_matrix(sigma[0])))
+        # print(f"full cheb, nodes = {x}")
+        # print(ts.noisy_correlator())
+        ## print(ts._b_T_matrix()[:, -1])
+        # print(ts._random_coefficients().shape)
 
     # print(abs(corrs[1] - corrs[0]))

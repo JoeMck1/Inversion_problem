@@ -6,8 +6,8 @@ from scipy.fft import dct
 # ── Physical constants ────────────────────────────────────────────────────────
 M_MU = 0.10566
 E_MAX = 24 * M_MU  # ~2.536 GeV
-E0 = 0.5  # representative threshold in GeV
-T_LAT = 96
+E0 = np.log(2)  # representative threshold in GeV
+T_LAT = 96  # unfolded
 SIGMAS = [0.44, 0.63]
 
 
@@ -95,17 +95,21 @@ def correlator_kernel_at_nodes(t, N):
 
 # ── Test parameters ───────────────────────────────────────────────────────────
 # Extend N_values into the large-N regime where C(t) converges
-N_values = [2**n for n in np.arange(6, 21)]
-N_ref = 2**23
-THRESHOLD = 1e-6
+powers_of_n = np.arange(6, 21)
+POWER_OF_N_REF = 23
+# N_values = [2**n for n in powers_of_n]
+N_values = [1000, 10_000, 100_000, 1_000_000]
+N_ref = 2**POWER_OF_N_REF
+THRESHOLD_POWER = -5
+THRESHOLD = 10**THRESHOLD_POWER
 
 test_ns = [1, 32, 128, 512]
-test_E_js = [0.11, 1.25, 2.53]
-test_t_taus = [1, 24, 48, 96]
+test_E_js = [M_MU, E_MAX / 2, E_MAX]
+test_t_taus = [1, 16, 32, 48]
 
 # Fixed n_b and random coefficients for full-result tests
 N_B = 512
-rng = np.random.default_rng(42)
+rng = np.random.default_rng(100)
 eps = 1e-7
 coeffs = np.empty(N_B + 1)
 rns = rng.uniform(-1, 1, N_B + 1)
@@ -190,13 +194,14 @@ COLORS_T = plt.cm.plasma(np.linspace(0.2, 0.85, len(test_t_taus)))
 COLORS_S = plt.cm.cool(np.linspace(0.2, 0.8, len(SIGMAS)))
 LS = ["-", "--", ":", "-."]
 MARKERS = ["o", "s", "^", "x"]
+save_path = "Plots/Full_Chebyshev_convergence_clean_48_data"
 
 
 def style_ax(ax, title):
     ax.set_facecolor("white")
     ax.set_title(title, fontsize=10, pad=8)
     ax.set_xlabel("N (Chebyshev nodes)", fontsize=9)
-    ax.set_ylabel(f"Relative error vs N={N_ref}", fontsize=9)
+    ax.set_ylabel(rf"Relative error vs $N=2^{{{POWER_OF_N_REF}}}$", fontsize=9)
     ax.tick_params(labelsize=8)
     for sp in ax.spines.values():
         sp.set_edgecolor("#bbbbbb")
@@ -213,7 +218,7 @@ def style_ax(ax, title):
         linewidth=0.9,
         linestyle="--",
         alpha=0.7,
-        label=r"$10^{-6}$ threshold",
+        label=rf"Threshold = $10^{{{THRESHOLD_POWER}}}$",
     )
 
 
@@ -297,13 +302,13 @@ fig1.suptitle(
     y=0.97,
 )
 fig1.savefig(
-    "Plots/Full_Chebyshev_convergence/convergence_A_n_dct.png",
+    f"{save_path}/convergence_A_n_E0_{E0}.png",
     dpi=150,
     bbox_inches="tight",
     facecolor="white",
 )
 plt.close(fig1)
-print("Saved Plots/Full_Chebyshev_convergence/convergence_A_n_dct.png")
+print(f"Saved {save_path}/convergence_A_n_E0_{E0}.png")
 
 # ── Figure 2: Full result convergence ─────────────────────────────────────────
 fig2 = plt.figure(figsize=(14, 6))
@@ -321,7 +326,7 @@ gs2 = gridspec.GridSpec(
 axs2 = [fig2.add_subplot(gs2[0, i]) for i in range(2)]
 
 ax = axs2[0]
-style_ax(ax, r"Full $\hat{\rho}_\sigma(E_j)$ = $\sum_n c_n A_n^K$")
+style_ax(ax, r"$\hat{\rho}_\sigma(E_j)$")
 for si, sigma in enumerate(SIGMAS):
     for ei, E_j in enumerate(test_E_js):
         ax.plot(
@@ -332,7 +337,7 @@ for si, sigma in enumerate(SIGMAS):
             marker=MARKERS[ei],
             markersize=4,
             linewidth=1.2,
-            label=rf"$\sigma={sigma}$, $E_j={E_j}$ GeV",
+            label=rf"$\sigma={sigma}$, $E_j={E_j:.6g}$ GeV",
         )
 ax.legend(
     fontsize=6.5,
@@ -343,7 +348,8 @@ ax.legend(
 )
 
 ax = axs2[1]
-style_ax(ax, r"Full $C(t)$ = $\sum_n c_n A_n^b$")
+style_ax(ax, r"$C(t)$")
+ax.yaxis.set_minor_locator(plt.NullLocator())
 for ti, t in enumerate(test_t_taus):
     ax.plot(
         N_values,
@@ -360,20 +366,20 @@ ax.legend(
 )
 
 fig2.suptitle(
-    r"Convergence of full $\hat{\rho}_\sigma(E)$ and $C(t)$,  $N_b=$"
+    r"Convergence of $\hat{\rho}_\sigma(E)$ and $C(t)$,  $N_b=$"
     + str(N_B)
-    + r"  [DCT-II, $x_k = \cos(\pi(k+\frac{1}{2})/N)$]",
+    + rf", $E_0 = {E0} GeV$",
     fontsize=12,
     y=0.98,
 )
 fig2.savefig(
-    "Plots/Full_Chebyshev_convergence/convergence_full_dct.png",
+    f"{save_path}/convergence_full_E0_{E0}.png",
     dpi=150,
     bbox_inches="tight",
     facecolor="white",
 )
 plt.close(fig2)
-print("Saved Plots/Full_Chebyshev_convergence/convergence_full_dct.png")
+print(f"Saved {save_path}/convergence_full_E0_{E0}.png")
 
 # ── Summary table ─────────────────────────────────────────────────────────────
 print(f"\nSmallest N achieving relative error < {THRESHOLD:.0e}:\n")

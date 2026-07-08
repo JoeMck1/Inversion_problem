@@ -33,8 +33,9 @@ class TrainingSet:
         self.lattice_data = lattice_data  # shape (bootstraps, time-slices)
         self.lattice_mean = np.mean(self.lattice_data, axis=0)
         self.cov_mat = np.cov(self.lattice_data, rowvar=False, bias=False)
-        self.n_t = self.lattice_data.shape[1]
-        self.time_slices = np.arange(1, self.n_t + 1)
+        self.n_T = self.lattice_data.shape[1]
+        self.time_slices = np.arange(1, self.n_T + 1)
+        self.unfolded_n_T = 2 * self.n_T
 
         # deterministic RNG per instance
         self.rng = np.random.default_rng(seed=seed)
@@ -91,12 +92,13 @@ class TrainingSet:
         """
         b_T(t, omega) = (omega^2/12*pi^2) * (e^{-t*omega} + e^{-omega * (T-t)})
         """
+        T = self.unfolded_n_T
         omega = self.E_of_x(self.nodes)[:, None]
         # omega has shape (n_ch_nodes, 1)
         times = self.time_slices[None, :]  # shape (1, n_T)
 
         return ((omega**2) / (12 * np.pi**2)) * (
-            np.exp(-omega * times) + np.exp(-omega * (self.n_t - times))
+            np.exp(-omega * times) + np.exp(-omega * (T - times))
         )  # shape (n_ch_nodes, n_T)
 
     def _integration(self, function):
@@ -120,10 +122,8 @@ class TrainingSet:
 
         # Generate n_b + 1 as \rho is defined for n = 0 to n = n_b,
         # i.e. a total of n_b + 1 terms.
-
-        F_n = (
-            dct(g_xk, type=2, axis=0)[: self.n_b + 1, :] / 2
-        )  # shape (n-b + 1, n_E or n_T)
+        # F_n shape (n-b + 1, n_E or n_T)
+        F_n = dct(g_xk, type=2, axis=0)[: self.n_b + 1, :] / 2
         F_0 = F_n[0, :]  # shape (n_E or n_T,)
         prefactor = np.pi / self.n_ch_nodes
 
@@ -151,13 +151,15 @@ class TrainingSet:
         noisy_corr = self.rng.multivariate_normal(correlator, covariance)
 
         # rel_noise = np.abs(noisy_corr - correlator) / np.abs(correlator)
-        # rel_noise_std = np.sqrt(np.diag(covariance)) / np.abs(correlator)
+        rel_noise_std = np.sqrt(np.diag(covariance)) / np.abs(correlator)
 
         # print("relative noise min")
+        # print(rel_noise)
         # print(sorted(rel_noise)[:3])
-        # print()
-        # print("relative noise std min")
-        # print(sorted(rel_noise_std)[:3])
+
+        print("relative noise std min")
+        print(sorted(list(enumerate(rel_noise_std)), key=lambda x: x[1]))
+        print(sorted(list(enumerate(rel_noise_std)), key=lambda x: x[1])[:3])
 
         return noisy_corr  # shape (n_t,)
 
@@ -450,9 +452,10 @@ if __name__ == "__main__":
     n_bs = [16, 32, 128, 512]
 
     # lattice data from the 48 ensemble for the 2pi.g5.001 operator
-    two_pt_data = np.load("noise_injection_data/2pt_data_48_unfolded.npy")
+    # we remove the irrelevant t=0 time-slice
+    two_pt_data = np.load("noise_injection_data/2pt_data_48_folded.npy")[:, 1:]
 
-    ch_nodes = [4096]
+    ch_nodes = [100000]
     corrs = []
     for x in ch_nodes:
         ts = TrainingSet(
@@ -461,11 +464,11 @@ if __name__ == "__main__":
             n_ch_nodes=x,
             sigma=sigma,
             lattice_data=two_pt_data,
-            seed=1,
+            seed=100,
         )
         corrs.append(ts.noisy_correlator())
-
-        print(ts._integration(ts._k_sigma_matrix(sigma[0])))
+        print(ts.n_T, ts.unfolded_n_T)
+        # print(ts._integration(ts._k_sigma_matrix(sigma[0])))
         # print(f"full cheb, nodes = {x}")
         # print(ts.noisy_correlator())
         ## print(ts._b_T_matrix()[:, -1])

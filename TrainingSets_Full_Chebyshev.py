@@ -14,33 +14,55 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+class TrainingSetContext:
+    """Computed once. Everything here is independent of n_b and rho_idx."""
+
+    def __init__(self, energies, sigmas, n_ch_nodes, n_T):
+        self.n_ch_nodes = n_ch_nodes
+        self.energies = energies
+        self.n_T = n_T
+        self.time_slices = np.arange(1, n_T + 1)
+        self.unfolded_n_T = 2 * n_T
+
+        k = np.arange(n_ch_nodes)
+        self.nodes = np.cos(np.pi * (k + 0.5) / n_ch_nodes)
+        self.omega = -np.log((1 - self.nodes) / 2)  # E_of_x(nodes)
+        self.weight = np.sqrt(1 - self.nodes**2) / (1 - self.nodes)
+
+        t = self.time_slices[None, :]
+        w = self.omega[:, None]
+        self.b_T_matrix = (w**2 / (12 * np.pi**2)) * (
+            np.exp(-w * t) + np.exp(-w * (self.unfolded_n_T - t))
+        )
+
+        E = energies[None, :]
+        self.k_sigma_matrices = {
+            sig: np.exp(-((E - w) ** 2) / (2 * sig**2))
+            / (sig * np.sqrt(2 * np.pi))
+            for sig in sigmas
+        }
+
+
 class TrainingSet:
     def __init__(
         self,
-        energies: list,
-        n_T: int,
+        ctx: TrainingSetContext,
         n_b: int,
-        n_ch_nodes: int,
-        sigma: float | tuple,
         seed: int,
     ) -> None:
-        self.energies = energies
-
+        self.ctx = ctx
         self.n_b = n_b  # number of basis functions.
-        self.n_ch_nodes = n_ch_nodes  # number of Chebyshev nodes.
-        self.sigma = [sigma] if isinstance(sigma, float) else list(sigma)
-
-        self.n_T = n_T
-        self.time_slices = np.arange(1, self.n_T + 1)
-        self.unfolded_n_T = 2 * self.n_T
 
         # deterministic RNG per instance
         self.rng = np.random.default_rng(seed=seed)
         self.e_0 = self.rng.uniform(0.2, 1.3)  # GeV
-
-        # precompute once
         self.coeffs = self._random_coefficients()
-        self.nodes = self._chebyshev_nodes()
+
+        step = np.heaviside(self.ctx.omega - self.e_0, 0)
+        self._step_weight = (step * self.ctx.weight)[:, None]
+
+        n_vals = np.arange(self.n_b + 1)
+        self._T_xmin = np.cos(n_vals * np.arccos(self.x_min()))
         pass
 
     # ── static helpers ──────────────────────────────────────────────────────
@@ -49,22 +71,10 @@ class TrainingSet:
     def x_of_E(E: np.ndarray) -> np.ndarray:
         return 1 - 2 * np.exp(-np.asarray(E))
 
-    @staticmethod
-    def E_of_x(x: np.ndarray) -> np.ndarray:
-        return -np.log((1 - x) / 2)
-
     def x_min(self) -> np.floating:
         return self.x_of_E(self.e_0)
 
     # ── private helpers ────────────────────────────────────────────────────
-
-    def _chebyshev_nodes(self) -> np.ndarray:
-        """
-        Compute x_k = cos(pi * (k + 1/2) / N)
-        """
-
-        k = np.arange(0, self.n_ch_nodes)
-        return np.cos(((np.pi * (k + 0.5)) / self.n_ch_nodes))
 
     def _random_coefficients(self):
         epsilon = 1e-7
@@ -73,30 +83,6 @@ class TrainingSet:
         coeffs[0] = rns[0]
         coeffs[1:] = rns[1:] / (np.arange(1, self.n_b + 1) ** (1 + epsilon))
         return coeffs
-
-    def _k_sigma_matrix(self, sig) -> np.ndarray:
-        """
-        K_sigma(E, omega) = 1/(sqrt(2*pi)*sigma) * exp(-(E-omega)^2/(2*sigma^2))
-        """
-        omega = self.E_of_x(self.nodes)[:, None]
-        # omega has shape (n_ch_nodes, 1)
-        energies = self.energies[None, :]  # shape (1, n_E)
-        return np.exp(-((energies - omega) ** 2) / (2 * sig**2)) / (
-            sig * np.sqrt(2 * np.pi)
-        )  # has shape (n_ch_nodes, n_E)
-
-    def _b_T_matrix(self) -> np.ndarray:
-        """
-        b_T(t, omega) = (omega^2/12*pi^2) * (e^{-t*omega} + e^{-omega * (T-t)})
-        """
-        T = self.unfolded_n_T
-        omega = self.E_of_x(self.nodes)[:, None]
-        # omega has shape (n_ch_nodes, 1)
-        times = self.time_slices[None, :]  # shape (1, n_T)
-
-        return ((omega**2) / (12 * np.pi**2)) * (
-            np.exp(-omega * times) + np.exp(-omega * (T - times))
-        )  # shape (n_ch_nodes, n_T)
 
     def _integration(self, function):
         """
@@ -110,11 +96,7 @@ class TrainingSet:
         """
         # function is either K_sigma, or b_T
 
-        arg = self.E_of_x(self.nodes) - self.e_0
-        step = np.heaviside(arg, 0)
-        weight = np.sqrt(1 - self.nodes**2) / (1 - self.nodes)
-
-        g_xk = (step * weight)[:, None] * function  # IS this right?
+        g_xk = self._step_weight * function
         # g_xk shape (n_ch_modes, n_E or n_T)
 
         # Generate n_b + 1 as \rho is defined for n = 0 to n = n_b,
@@ -122,13 +104,10 @@ class TrainingSet:
         # F_n shape (n-b + 1, n_E or n_T)
         F_n = dct(g_xk, type=2, axis=0)[: self.n_b + 1, :] / 2
         F_0 = F_n[0, :]  # shape (n_E or n_T,)
-        prefactor = np.pi / self.n_ch_nodes
-
-        n_vals = np.arange(self.n_b + 1)
-        T_xmin = np.cos(n_vals * np.arccos(self.x_min()))  # (n_b + 1,)
+        prefactor = np.pi / self.ctx.n_ch_nodes
 
         result = prefactor * (
-            self.coeffs @ (F_n - (T_xmin[:, None] * F_0[None, :]))
+            self.coeffs @ (F_n - (self._T_xmin[:, None] * F_0[None, :]))
         )
         return result  # shape (n_E, or n_T,)
 
@@ -136,11 +115,12 @@ class TrainingSet:
 
     def smeared_spectral_densities(self) -> list[np.ndarray]:
         return [
-            self._integration(self._k_sigma_matrix(sig)) for sig in self.sigma
+            self._integration(matrix)
+            for matrix in self.ctx.k_sigma_matrices.values()
         ]
 
     def correlator(self) -> np.ndarray:
-        return self._integration(self._b_T_matrix())
+        return self._integration(self.ctx.b_T_matrix)
 
     def relative_noise(self, lattice_data) -> np.ndarray:
         correlator = self.correlator()
@@ -157,7 +137,7 @@ class TrainingSet:
         return rel_noise_std
 
     def spectral_densities(self) -> np.ndarray:
-        mapped_Es = self.x_of_E(self.energies)  # (n_E,)
+        mapped_Es = self.x_of_E(self.ctx.energies)  # (n_E,)
         x_min = self.x_min()
 
         # T_E (n_b+1, n_E)
@@ -181,9 +161,9 @@ class TrainingSet:
 
 
 def generate_all_training_sets(
-    lattice_data: np.ndarray,
     energies: np.ndarray,
     sigmas: list[float],
+    n_T: int,
     n_b_values: list[int],
     n_rho_values: list[int],
     n_ch_nodes: int,
@@ -244,7 +224,6 @@ def generate_all_training_sets(
     n_rho_values = sorted(n_rho_values)  # ensure ascending
     n_rho_max = n_rho_values[-1]
     n_E = len(energies)
-    n_T = lattice_data.shape[1]
 
     log.info(
         "Generating training sets: N_b=%s, N_rho levels=%s, sigmas=%s",
@@ -255,6 +234,9 @@ def generate_all_training_sets(
     log.info("Output directory: %s", os.path.abspath(output_dir))
 
     total_files = len(n_b_values)
+
+    ctx = TrainingSetContext(energies, sigmas, n_ch_nodes, n_T)
+
     for file_idx, n_b in enumerate(n_b_values, 1):
 
         fname = os.path.join(
@@ -290,14 +272,7 @@ def generate_all_training_sets(
             # Deterministic, well-separated seed per (n_b, rho_idx)
             seed = int(n_b * 1_000_000 + rho_idx)
 
-            ts = TrainingSet(
-                energies=energies,
-                n_b=n_b,
-                n_ch_nodes=n_ch_nodes,
-                sigma=sigmas,
-                lattice_data=lattice_data,
-                seed=seed,
-            )
+            ts = TrainingSet(ctx, n_b, seed)
 
             all_correlators[rho_idx] = ts.correlator()
             sds = ts.smeared_spectral_densities()  # list of (n_E,)
@@ -447,15 +422,16 @@ if __name__ == "__main__":
     # lattice data from the 48 ensemble for the 2pi.g5.001 operator
     # we remove the irrelevant t=0 time-slice
     two_pt_data = np.load("noise_injection_data/2pt_data_48_folded.npy")[:, 1:]
+    n_T = len(two_pt_data[0])
 
     ch_nodes = 10_000
 
     output_dir = "/home/joe/work/Inversion_problem/Training_sets"
 
     generate_all_training_sets(
-        lattice_data=two_pt_data,
         energies=e_range,
         sigmas=sigma,
+        n_T=n_T,
         n_b_values=n_bs,
         n_rho_values=n_rhos,
         n_ch_nodes=ch_nodes,

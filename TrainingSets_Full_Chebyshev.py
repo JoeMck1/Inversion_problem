@@ -18,10 +18,10 @@ class TrainingSet:
     def __init__(
         self,
         energies: list,
+        n_T: int,
         n_b: int,
         n_ch_nodes: int,
         sigma: float | tuple,
-        lattice_data: np.ndarray,
         seed: int,
     ) -> None:
         self.energies = energies
@@ -30,10 +30,7 @@ class TrainingSet:
         self.n_ch_nodes = n_ch_nodes  # number of Chebyshev nodes.
         self.sigma = [sigma] if isinstance(sigma, float) else list(sigma)
 
-        self.lattice_data = lattice_data  # shape (bootstraps, time-slices)
-        self.lattice_mean = np.mean(self.lattice_data, axis=0)
-        self.cov_mat = np.cov(self.lattice_data, rowvar=False, bias=False)
-        self.n_T = self.lattice_data.shape[1]
+        self.n_T = n_T
         self.time_slices = np.arange(1, self.n_T + 1)
         self.unfolded_n_T = 2 * self.n_T
 
@@ -142,26 +139,22 @@ class TrainingSet:
             self._integration(self._k_sigma_matrix(sig)) for sig in self.sigma
         ]
 
-    def noisy_correlator(self) -> np.ndarray:
-        correlator = self._integration(self._b_T_matrix())
+    def correlator(self) -> np.ndarray:
+        return self._integration(self._b_T_matrix())
+
+    def relative_noise(self, lattice_data) -> np.ndarray:
+        correlator = self.correlator()
+
+        lattice_mean = np.mean(lattice_data, axis=0)
+        cov_mat = np.cov(lattice_data, rowvar=False, bias=False)
 
         # Add in noise
-        normalisation = (correlator[0] / self.lattice_mean[0]) ** 2
-        covariance = normalisation * self.cov_mat
-        noisy_corr = self.rng.multivariate_normal(correlator, covariance)
+        normalisation = (correlator[0] / lattice_mean[0]) ** 2
+        covariance = normalisation * cov_mat
 
-        # rel_noise = np.abs(noisy_corr - correlator) / np.abs(correlator)
         rel_noise_std = np.sqrt(np.diag(covariance)) / np.abs(correlator)
 
-        # print("relative noise min")
-        # print(rel_noise)
-        # print(sorted(rel_noise)[:3])
-
-        print("relative noise std min")
-        print(sorted(list(enumerate(rel_noise_std)), key=lambda x: x[1]))
-        print(sorted(list(enumerate(rel_noise_std)), key=lambda x: x[1])[:3])
-
-        return noisy_corr  # shape (n_t,)
+        return rel_noise_std
 
     def spectral_densities(self) -> np.ndarray:
         mapped_Es = self.x_of_E(self.energies)  # (n_E,)
@@ -306,7 +299,7 @@ def generate_all_training_sets(
                 seed=seed,
             )
 
-            all_correlators[rho_idx] = ts.noisy_correlator()
+            all_correlators[rho_idx] = ts.correlator()
             sds = ts.smeared_spectral_densities()  # list of (n_E,)
             for sig, sd in zip(sigmas, sds):
                 all_smeared[sig][rho_idx] = sd
@@ -443,7 +436,7 @@ def load_training_set(
 
 if __name__ == "__main__":
     muon_mass = 0.10566  # GeV
-    e_max, e_min = 24 * muon_mass, muon_mass
+    e_min, e_max = muon_mass, 24 * muon_mass
     e_range = np.linspace(e_min, e_max, 47)
 
     sigma = [0.44, 0.63]  # GeV
@@ -455,23 +448,16 @@ if __name__ == "__main__":
     # we remove the irrelevant t=0 time-slice
     two_pt_data = np.load("noise_injection_data/2pt_data_48_folded.npy")[:, 1:]
 
-    ch_nodes = [100000]
-    corrs = []
-    for x in ch_nodes:
-        ts = TrainingSet(
-            energies=e_range,
-            n_b=n_bs[-1],
-            n_ch_nodes=x,
-            sigma=sigma,
-            lattice_data=two_pt_data,
-            seed=100,
-        )
-        corrs.append(ts.noisy_correlator())
-        print(ts.n_T, ts.unfolded_n_T)
-        # print(ts._integration(ts._k_sigma_matrix(sigma[0])))
-        # print(f"full cheb, nodes = {x}")
-        # print(ts.noisy_correlator())
-        ## print(ts._b_T_matrix()[:, -1])
-        # print(ts._random_coefficients().shape)
+    ch_nodes = 10_000
 
-    # print(abs(corrs[1] - corrs[0]))
+    output_dir = "/home/joe/work/Inversion_problem/Training_sets"
+
+    generate_all_training_sets(
+        lattice_data=two_pt_data,
+        energies=e_range,
+        sigmas=sigma,
+        n_b_values=n_bs,
+        n_rho_values=n_rhos,
+        n_ch_nodes=ch_nodes,
+        output_dir=output_dir,
+    )

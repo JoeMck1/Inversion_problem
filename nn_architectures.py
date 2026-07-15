@@ -20,6 +20,7 @@ of convolutional "maps"):
     Output (47,)
 """
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -328,6 +329,106 @@ class CorrelatorStandardiser:
 
 
 # =============================================================================
+# NOISE INJECTION
+# =============================================================================
+
+
+class NoiseInjector:
+    """
+    Draws noisy correlators from the multivariate Gaussian of Eq. (44):
+
+        C_noisy ~ N( C, (C(a)/C_latt(a))^2 * Sigma_latt )
+
+    where Sigma_latt is the (fixed) covariance matrix of the real lattice
+    correlator, and the scalar prefactor (C(a)/C_latt(a))^2 differs for
+    every sample because it depends on that sample's own C(a).
+
+    Design note: since Sigma_latt is the SAME matrix for every sample and
+    every replica -- only the scalar prefactor changes -- its Cholesky
+    factor is computed once in __init__ and reused for every draw. This
+    means generating noise for 20 replicas costs 20 cheap sampling passes,
+    not 20 repeats of an O(n_T^3) decomposition.
+
+    Sampling identity used: if Sigma = L L^T (Cholesky factor L), then
+        x = mean + sqrt(scalar) * (L @ z),   z ~ N(0, I)
+    has covariance scalar * Sigma, as required. For a batch of N samples
+    this is implemented as a single matrix multiplication.
+    """
+
+    def __init__(
+        self,
+        cov_mat: np.ndarray,
+        lattice_mean: np.ndarray,
+        seed: int,
+        jitter: float = 0.0,
+    ):
+        """
+        Parameters
+        ----------
+        cov_mat : ndarray, shape (n_T, n_T)
+            Covariance matrix Sigma_latt of the real lattice correlator,
+            estimated from the bootstrap/jackknife samples.
+        lattice_mean : ndarray, shape (n_T,)
+            Mean lattice correlator C_latt(t). Only C_latt(a), the first
+            time slice, is actually used (see Eq. 44).
+        seed : int
+            Seed for this injector's random number generator. Use a
+            DIFFERENT seed per replica so that each replica's noise draw
+            is independent, as required by the ensemble procedure
+            (Section IV D).
+        jitter : float
+            Optional small value added to the diagonal of cov_mat before
+            the Cholesky decomposition, in case the empirical covariance
+            is not exactly positive-definite (e.g. too few bootstrap
+            samples relative to n_T). Default 0.0 (no jitter).
+        """
+        cov = np.asarray(cov_mat, dtype=np.float64)
+        if jitter > 0.0:
+            cov = cov + jitter * np.eye(cov.shape[0])
+
+        # Cholesky factor: cov = L @ L.T. Computed ONCE, reused for every
+        # sample and every call to .sample().
+        self.L = np.linalg.cholesky(cov)  # shape (n_T, n_T)
+        self.lattice_mean_a = float(lattice_mean[0])  # C_latt(a)
+        self.n_T = cov.shape[0]
+        self.rng = np.random.default_rng(seed)
+
+    def sample(self, clean_correlators: np.ndarray) -> np.ndarray:
+        """
+        Draw one independent noisy correlator for every row of
+        clean_correlators.
+
+        Parameters
+        ----------
+        clean_correlators : ndarray, shape (N, n_T)
+            The clean (noise-free) correlator vectors C, e.g. loaded
+            straight from load_training_set().
+
+        Returns
+        -------
+        ndarray, shape (N, n_T)
+            Noisy correlators C_noisy, one fresh draw per row.
+        """
+        clean_correlators = np.asarray(clean_correlators, dtype=np.float64)
+        N = clean_correlators.shape[0]
+
+        # Per-sample scalar prefactor (C(a)/C_latt(a))^2, shape (N,)
+        C_a = clean_correlators[:, 0]
+        prefactor = (C_a / self.lattice_mean_a) ** 2
+
+        # Draw N independent standard-normal vectors, shape (N, n_T)
+        z = self.rng.standard_normal(size=(N, self.n_T))
+
+        # Correlate them via the shared Cholesky factor: (z @ L.T) has,
+        # row by row, covariance Sigma_latt. Then scale each row by
+        # sqrt(prefactor) to get covariance prefactor * Sigma_latt.
+        correlated_noise = z @ self.L.T  # (N, n_T)
+        scaled_noise = np.sqrt(prefactor)[:, None] * correlated_noise
+
+        return clean_correlators + scaled_noise
+
+
+# =============================================================================
 # LOSS FUNCTION
 # =============================================================================
 
@@ -570,37 +671,186 @@ def train_replica(
 # =============================================================================
 
 
+def build_replica_dataloaders(
+    clean_correlators: np.ndarray,
+    smeared_rho: np.ndarray,
+    standardizer: CorrelatorStandardiser,
+    noise_injector: NoiseInjector,
+    batch_size: int = 32,
+    val_fraction: float = 0.2,
+    split_seed: int = 0,
+):
+    """
+    Turn one replica's worth of raw numpy arrays into train/val DataLoaders.
+
+    This performs, in order, exactly the steps described in Sections IV B-D:
+      1. Draw ONE fresh noisy correlator per clean pair (Eq. 44) --
+         independent for every replica because noise_injector carries its
+         own per-replica seed.
+      2. Standardize the noisy correlators using mu, gamma that were fit
+         on the CLEAN correlators (Eq. 45-47) -- these are the same for
+         every replica, since they characterise the shared training set,
+         not any particular noise draw.
+      3. Split the (correlator, target) pairs 80/20 into train/validation
+         (Section IV D).
+      4. Wrap each split in a DataLoader.
+
+    Parameters
+    ----------
+    clean_correlators : ndarray, shape (N_rho, n_T)
+        Clean correlators C, shared across all replicas.
+    smeared_rho : ndarray, shape (N_rho, n_E)
+        Target smeared spectral densities rho_hat_sigma, shared across
+        all replicas (same pairing as clean_correlators).
+    standardizer : CorrelatorStandardizer
+        Already fit on the clean correlators (fit once, outside this
+        function, and reused for every replica -- see fit_standardizer
+        below).
+    noise_injector : NoiseInjector
+        A NoiseInjector constructed with a seed UNIQUE to this replica.
+    batch_size : int
+        Mini-batch size (BS = 32 in the paper).
+    val_fraction : float
+        Fraction of pairs held out for validation / early stopping (0.2
+        in the paper, i.e. an 80/20 split).
+    split_seed : int
+        Seed controlling which pairs land in the validation split.
+
+    Returns
+    -------
+    (train_loader, val_loader) : tuple of torch.utils.data.DataLoader
+    """
+    # --- Step 1: fresh noise for this replica ---
+    noisy_correlators = noise_injector.sample(
+        clean_correlators
+    )  # (N, n_T) numpy
+
+    # --- Convert to tensors ---
+    noisy_t = torch.from_numpy(noisy_correlators).float()
+    targets_t = torch.from_numpy(smeared_rho).float()
+
+    # --- Step 2: standardize using the CLEAN-data statistics ---
+    standardized_t = standardizer.transform(noisy_t)
+
+    # --- Step 3+4: split and wrap in DataLoaders ---
+    dataset = torch.utils.data.TensorDataset(standardized_t, targets_t)
+
+    n_total = len(dataset)
+    n_val = int(round(n_total * val_fraction))
+    n_train = n_total - n_val
+
+    generator = torch.Generator().manual_seed(split_seed)
+    train_set, val_set = torch.utils.data.random_split(
+        dataset, [n_train, n_val], generator=generator
+    )
+
+    train_loader = torch.utils.data.DataLoader(
+        train_set, batch_size=batch_size, shuffle=True, generator=generator
+    )
+    val_loader = torch.utils.data.DataLoader(
+        val_set, batch_size=batch_size, shuffle=False
+    )
+
+    return train_loader, val_loader
+
+
+def fit_standardizer(clean_correlators: np.ndarray) -> CorrelatorStandardiser:
+    """
+    Fit a CorrelatorStandardizer on the clean (noise-free) correlators.
+
+    This is done ONCE, before the replica loop, and the same fitted
+    standardizer is reused for every replica -- because mu and gamma
+    characterise the shared training set as a whole (Eq. 45-47), not
+    any individual replica's noise draw.
+
+    Parameters
+    ----------
+    clean_correlators : ndarray, shape (N_rho, n_T)
+
+    Returns
+    -------
+    CorrelatorStandardizer, already fit.
+    """
+    standardizer = CorrelatorStandardiser()
+    clean_t = torch.from_numpy(clean_correlators).float()
+    standardizer.fit(clean_t)
+    return standardizer
+
+
 def train_ensemble(
     architecture_fn,
-    train_loader: torch.utils.data.DataLoader,
-    val_loader: torch.utils.data.DataLoader,
+    clean_correlators: np.ndarray,
+    smeared_rho: np.ndarray,
+    cov_mat: np.ndarray,
+    lattice_mean: np.ndarray,
     device: torch.device,
     n_replicas: int = 20,
+    batch_size: int = 32,
+    val_fraction: float = 0.2,
+    base_seed: int = 0,
 ) -> list[nn.Module]:
     """
     Train an ensemble of Nr=20 replicas of the same architecture.
 
     Each replica starts from a different random weight initialisation
-    (handled automatically by SpectralNet.__init__) but is trained on
-    the SAME training set. The spread of their predictions is used as
-    the network systematic error Delta^net_sigma (Eq. 52).
+    (handled automatically by SpectralNet.__init__) AND trains on a
+    freshly drawn noisy version of the SAME underlying clean pairs
+    (C, rho_hat_sigma) -- matching the procedure described on page 12:
+    "each machine of the ensemble is trained ... starting from the same
+    unsmeared spectral densities ... but with different noisy input
+    correlator vectors C_noisy."
+
+    The spread of the resulting predictions across replicas is what
+    gives the network systematic error Delta^net_sigma (Eq. 52).
 
     Parameters
     ----------
     architecture_fn : One of arcS, arcM, arcL (a callable returning a model).
-    train_loader    : DataLoader for the training set.
-    val_loader      : DataLoader for the validation set.
-    device          : torch.device.
-    n_replicas      : Number of replicas (Nr = 20 in the paper).
+    clean_correlators : ndarray, shape (N_rho, n_T)
+        Clean correlators C, as loaded from your HDF5 file (load_training_set).
+    smeared_rho : ndarray, shape (N_rho, n_E)
+        Target smeared spectral densities, paired with clean_correlators.
+    cov_mat : ndarray, shape (n_T, n_T)
+        Covariance matrix of the real lattice correlator (Eq. 44).
+    lattice_mean : ndarray, shape (n_T,)
+        Mean lattice correlator C_latt(t); only C_latt(a) is used.
+    device : torch.device.
+    n_replicas : Number of replicas (Nr = 20 in the paper).
+    batch_size : Mini-batch size (BS = 32 in the paper).
+    val_fraction : Held-out validation fraction (0.2 in the paper).
+    base_seed : int
+        Seeds are derived from this as base_seed + r for replica r, so
+        every replica gets independent-but-reproducible noise and split.
 
     Returns
     -------
     list of trained nn.Module instances.
     """
+    # Standardization statistics come from the CLEAN correlators and are
+    # shared by every replica -- fit this exactly once, outside the loop.
+    standardizer = fit_standardizer(clean_correlators)
+
     ensemble = []
 
     for r in range(1, n_replicas + 1):
         print(f"Training replica {r}/{n_replicas} ...")
+
+        # A distinct seed per replica ensures independent noise draws --
+        # this is the piece that was previously missing.
+        replica_seed = base_seed + r
+        noise_injector = NoiseInjector(
+            cov_mat=cov_mat, lattice_mean=lattice_mean, seed=replica_seed
+        )
+
+        train_loader, val_loader = build_replica_dataloaders(
+            clean_correlators=clean_correlators,
+            smeared_rho=smeared_rho,
+            standardizer=standardizer,
+            noise_injector=noise_injector,
+            batch_size=batch_size,
+            val_fraction=val_fraction,
+            split_seed=replica_seed,
+        )
 
         # Each call to architecture_fn() creates a fresh model with new
         # random weights (because _initialise_weights uses torch.randn internally)
@@ -666,4 +916,75 @@ if __name__ == "__main__":
     print(
         f"After:  mean={standardized.mean():.3f}, "
         f"std={standardized.std():.3f}"
+    )
+
+    print("\n" + "=" * 60)
+    print("NoiseInjector / per-replica DataLoader demo")
+    print("=" * 60)
+
+    n_T, n_E, n_rho = 64, 47, 200  # small fake dataset for a quick check
+
+    rng = np.random.default_rng(42)
+
+    # Fake clean correlators (decaying, positive) and fake targets
+    fake_clean_correlators = np.exp(-np.linspace(0, 5, n_T)) * rng.uniform(
+        0.5, 1.5, size=(n_rho, n_T)
+    )
+    fake_smeared_rho = rng.uniform(-1, 1, size=(n_rho, n_E))
+
+    # Fake lattice covariance: symmetric positive-definite matrix
+    A = rng.normal(size=(n_T, n_T))
+    fake_cov_mat = 1e-4 * (A @ A.T + n_T * np.eye(n_T))  # guaranteed PD
+    fake_lattice_mean = fake_clean_correlators.mean(axis=0)
+
+    # Fit the standardizer ONCE on the clean data, as the ensemble does
+    standardizer = fit_standardizer(fake_clean_correlators)
+
+    # Build two independent NoiseInjectors, simulating replica 1 and 2
+    injector_1 = NoiseInjector(fake_cov_mat, fake_lattice_mean, seed=101)
+    injector_2 = NoiseInjector(fake_cov_mat, fake_lattice_mean, seed=202)
+
+    noisy_1 = injector_1.sample(fake_clean_correlators)
+    noisy_2 = injector_2.sample(fake_clean_correlators)
+
+    # Confirm the two replicas' noise draws are different from each other...
+    max_diff = np.max(np.abs(noisy_1 - noisy_2))
+    print(
+        f"Max |noisy_1 - noisy_2| across all entries: {max_diff:.4f} "
+        f"(should be > 0: independent noise per replica)"
+    )
+
+    # ...but both are still centred on the same clean correlators
+    mean_dev_1 = np.mean(np.abs(noisy_1 - fake_clean_correlators))
+    mean_dev_2 = np.mean(np.abs(noisy_2 - fake_clean_correlators))
+    print(f"Mean |noisy_1 - clean|: {mean_dev_1:.4f}")
+    print(f"Mean |noisy_2 - clean|: {mean_dev_2:.4f}")
+    print(
+        "(both should be small and similar in size -- same underlying "
+        "clean pairs, just different noise realisations)"
+    )
+
+    # Build DataLoaders for "replica 1" end to end
+    train_loader, val_loader = build_replica_dataloaders(
+        clean_correlators=fake_clean_correlators,
+        smeared_rho=fake_smeared_rho,
+        standardizer=standardizer,
+        noise_injector=injector_1,
+        batch_size=32,
+        val_fraction=0.2,
+        split_seed=101,
+    )
+
+    n_train_batches = len(train_loader)
+    n_val_batches = len(val_loader)
+    n_train_samples = len(train_loader.dataset)
+    n_val_samples = len(val_loader.dataset)
+    print(f"\nTrain: {n_train_samples} samples in {n_train_batches} batches")
+    print(f"Val:   {n_val_samples} samples in {n_val_batches} batches")
+
+    # Pull one batch to confirm shapes are correct
+    batch_correlators, batch_targets = next(iter(train_loader))
+    print(
+        f"One training batch: correlators {batch_correlators.shape}, "
+        f"targets {batch_targets.shape}"
     )

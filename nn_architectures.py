@@ -1,13 +1,15 @@
 """
-PyTorch implementation of the three neural network architectures (arcS, arcM, arcL)
-from "Teaching to extract spectral densities from lattice correlators to a broad
-audience of learning-machines" (Buzzicotti, De Santis, Tantalo, 2024).
+PyTorch implementation of the three neural network architectures
+(arcS, arcM, arcL) from "Teaching to extract spectral densities from
+lattice correlators to a broad audience of learning-machines"
+(Buzzicotti, De Santis, Tantalo, 2024).
 
-Each network solves a regression problem: given a 64-component Euclidean correlator
-C(t) as input, predict a 47-component smeared spectral density rho_hat(E) as output.
+Each network solves a regression problem: given a 64-component
+Euclidean correlator C(t) as input, predict a 47-component smeared
+spectral density rho_hat(E) as output.
 
-Architecture overview (same structure for all three, differing only in the number
-of convolutional "maps"):
+Architecture overview (same structure for all three, differing only in
+the number of convolutional "maps"):
 
     Input (64,)
         |
@@ -19,6 +21,9 @@ of convolutional "maps"):
         |
     Output (47,)
 """
+
+import json
+import os
 
 import numpy as np
 import torch
@@ -344,12 +349,30 @@ class NoiseInjector:
     every sample because it depends on that sample's own C(a).
 
     Design note: since Sigma_latt is the SAME matrix for every sample and
-    every replica -- only the scalar prefactor changes -- its Cholesky
-    factor is computed once in __init__ and reused for every draw. This
-    means generating noise for 20 replicas costs 20 cheap sampling passes,
-    not 20 repeats of an O(n_T^3) decomposition.
+    every replica -- only the scalar prefactor changes -- its decomposition
+    is computed once in __init__ and reused for every draw. This means
+    generating noise for 20 replicas costs 20 cheap sampling passes, not
+    20 repeats of an O(n_T^3) decomposition.
 
-    Sampling identity used: if Sigma = L L^T (Cholesky factor L), then
+    We decompose Sigma_latt via eigendecomposition rather than Cholesky.
+    A sample covariance matrix estimated from N_c bootstrap/jackknife
+    draws has rank at most N_c - 1, so unless N_c is comfortably larger
+    than n_T it is only positive SEMI-definite: some eigenvalues are
+    exactly (or, after floating-point roundoff, very slightly negative)
+    zero. Cholesky requires strict positive-definiteness and raises
+    LinAlgError otherwise. Eigendecomposition works for any symmetric
+    matrix; we clip away the (numerically meaningless) negative
+    eigenvalues, which removes floating-point noise around zero without
+    inflating or otherwise altering the covariance structure the data
+    actually supports. This mirrors what np.random.multivariate_normal
+    does internally by default (it uses an SVD-based decomposition).
+    The difference being SVD, instead of clipping negative eigenvalues
+    to 0, clips them to |\lamba|.
+
+    Sampling identity used: if Sigma = Q Lambda Q^T (eigendecomposition,
+    with Lambda's negative entries clipped to 0) and we set
+        L = Q @ sqrt(Lambda_clipped),
+    then L @ L.T = Sigma (up to the clipped directions), so
         x = mean + sqrt(scalar) * (L @ z),   z ~ N(0, I)
     has covariance scalar * Sigma, as required. For a batch of N samples
     this is implemented as a single matrix multiplication.
@@ -360,7 +383,7 @@ class NoiseInjector:
         cov_mat: np.ndarray,
         lattice_mean: np.ndarray,
         seed: int,
-        jitter: float = 0.0,
+        eigenvalue_floor: float = 0.0,
     ):
         """
         Parameters
@@ -376,19 +399,25 @@ class NoiseInjector:
             DIFFERENT seed per replica so that each replica's noise draw
             is independent, as required by the ensemble procedure
             (Section IV D).
-        jitter : float
-            Optional small value added to the diagonal of cov_mat before
-            the Cholesky decomposition, in case the empirical covariance
-            is not exactly positive-definite (e.g. too few bootstrap
-            samples relative to n_T). Default 0.0 (no jitter).
+        eigenvalue_floor : float
+            Eigenvalues of cov_mat below this value are clipped up to it
+            before reconstructing L. Default 0.0 simply zeroes out
+            negative eigenvalues (numerical noise from the finite-sample
+            covariance estimate) without adding any variance that wasn't
+            already present in the data. Only raise this above 0.0 if you
+            deliberately want to inflate the noise floor -- that is a
+            different, explicit choice from merely fixing the
+            positive-semidefiniteness issue.
         """
         cov = np.asarray(cov_mat, dtype=np.float64)
-        if jitter > 0.0:
-            cov = cov + jitter * np.eye(cov.shape[0])
+        eigvals, eigvecs = np.linalg.eigh(cov)
 
-        # Cholesky factor: cov = L @ L.T. Computed ONCE, reused for every
-        # sample and every call to .sample().
-        self.L = np.linalg.cholesky(cov)  # shape (n_T, n_T)
+        # Clip away negative eigenvalues (numerical artefacts of a rank-
+        # deficient sample covariance)
+        eigvals_clipped = np.clip(eigvals, a_min=eigenvalue_floor, a_max=None)
+
+        # L such that L @ L.T reconstructs the (clipped) covariance matrix
+        self.L = eigvecs @ np.diag(np.sqrt(eigvals_clipped))
         self.lattice_mean_a = float(lattice_mean[0])  # C_latt(a)
         self.n_T = cov.shape[0]
         self.rng = np.random.default_rng(seed)
@@ -674,7 +703,7 @@ def train_replica(
 def build_replica_dataloaders(
     clean_correlators: np.ndarray,
     smeared_rho: np.ndarray,
-    standardizer: CorrelatorStandardiser,
+    standardiser: CorrelatorStandardiser,
     noise_injector: NoiseInjector,
     batch_size: int = 32,
     val_fraction: float = 0.2,
@@ -702,9 +731,9 @@ def build_replica_dataloaders(
     smeared_rho : ndarray, shape (N_rho, n_E)
         Target smeared spectral densities rho_hat_sigma, shared across
         all replicas (same pairing as clean_correlators).
-    standardizer : CorrelatorStandardizer
+    standardiser : CorrelatorStandardiser
         Already fit on the clean correlators (fit once, outside this
-        function, and reused for every replica -- see fit_standardizer
+        function, and reused for every replica -- see fit_standardiser
         below).
     noise_injector : NoiseInjector
         A NoiseInjector constructed with a seed UNIQUE to this replica.
@@ -730,7 +759,7 @@ def build_replica_dataloaders(
     targets_t = torch.from_numpy(smeared_rho).float()
 
     # --- Step 2: standardize using the CLEAN-data statistics ---
-    standardized_t = standardizer.transform(noisy_t)
+    standardized_t = standardiser.transform(noisy_t)
 
     # --- Step 3+4: split and wrap in DataLoaders ---
     dataset = torch.utils.data.TensorDataset(standardized_t, targets_t)
@@ -754,12 +783,12 @@ def build_replica_dataloaders(
     return train_loader, val_loader
 
 
-def fit_standardizer(clean_correlators: np.ndarray) -> CorrelatorStandardiser:
+def fit_standardiser(clean_correlators: np.ndarray) -> CorrelatorStandardiser:
     """
-    Fit a CorrelatorStandardizer on the clean (noise-free) correlators.
+    Fit a CorrelatorStandardiser on the clean (noise-free) correlators.
 
     This is done ONCE, before the replica loop, and the same fitted
-    standardizer is reused for every replica -- because mu and gamma
+    standardiser is reused for every replica -- because mu and gamma
     characterise the shared training set as a whole (Eq. 45-47), not
     any individual replica's noise draw.
 
@@ -769,12 +798,12 @@ def fit_standardizer(clean_correlators: np.ndarray) -> CorrelatorStandardiser:
 
     Returns
     -------
-    CorrelatorStandardizer, already fit.
+    CorrelatorStandardiser, already fit.
     """
-    standardizer = CorrelatorStandardiser()
+    standardiser = CorrelatorStandardiser()
     clean_t = torch.from_numpy(clean_correlators).float()
-    standardizer.fit(clean_t)
-    return standardizer
+    standardiser.fit(clean_t)
+    return standardiser
 
 
 def train_ensemble(
@@ -788,7 +817,7 @@ def train_ensemble(
     batch_size: int = 32,
     val_fraction: float = 0.2,
     base_seed: int = 0,
-) -> list[nn.Module]:
+) -> tuple[list[nn.Module], CorrelatorStandardiser]:
     """
     Train an ensemble of Nr=20 replicas of the same architecture.
 
@@ -824,11 +853,17 @@ def train_ensemble(
 
     Returns
     -------
-    list of trained nn.Module instances.
+    (ensemble, standardiser) : tuple
+        ensemble     : list of Nr trained nn.Module instances.
+        standardiser : the CorrelatorStandardiser fit on clean_correlators.
+                       MUST be saved alongside the models and reused,
+                       unchanged, to pre-process any correlator (mock,
+                       validation, or real lattice data) fed to this
+                       ensemble later.
     """
     # Standardization statistics come from the CLEAN correlators and are
     # shared by every replica -- fit this exactly once, outside the loop.
-    standardizer = fit_standardizer(clean_correlators)
+    standardiser = fit_standardiser(clean_correlators)
 
     ensemble = []
 
@@ -845,7 +880,7 @@ def train_ensemble(
         train_loader, val_loader = build_replica_dataloaders(
             clean_correlators=clean_correlators,
             smeared_rho=smeared_rho,
-            standardizer=standardizer,
+            standardiser=standardiser,
             noise_injector=noise_injector,
             batch_size=batch_size,
             val_fraction=val_fraction,
@@ -866,125 +901,166 @@ def train_ensemble(
 
         ensemble.append(model)
 
-    return ensemble
+    return ensemble, standardiser
 
 
 # =============================================================================
-# QUICK SANITY CHECK
+# SAVING / LOADING A TRAINED ENSEMBLE
+# =============================================================================
+
+
+def save_ensemble(
+    ensemble: list[nn.Module],
+    standardiser: CorrelatorStandardiser,
+    save_dir: str,
+    metadata: dict | None = None,
+) -> None:
+    """
+    Save a trained ensemble to disk so it can be reloaded later for
+    use on real data.
+
+    Two things are saved together:
+      1. Each replica's weights.
+      2. The standardiser's mu and gamma -- without these, any future
+         correlator cannot be correctly pre-processed before being fed
+         into the network.
+
+    We save model.state_dict() rather than pickling the whole nn.Module.
+    state_dict() is just an ordered dict of tensor names -> tensor
+    values (weights and biases).
+
+    Parameters
+    ----------
+    ensemble : list of trained nn.Module (all the same architecture).
+    standardiser : the CorrelatorStandardiser used during training.
+    save_dir : directory to write into (created if it doesn't exist).
+    metadata : optional dict of extra info you want recorded alongside
+        the weights, e.g. {"architecture": "arcS", "n_b": 512,
+        "n_rho": 800_000, "sigma": 0.44}.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # --- Save each replica's weights ---
+    for r, model in enumerate(ensemble, start=1):
+        weights_path = os.path.join(save_dir, f"replica_{r:02d}.pt")
+        torch.save(model.state_dict(), weights_path)
+
+    # --- Save the standardiser's mu and gamma ---
+    standardiser_path = os.path.join(save_dir, "standardiser.pt")
+    torch.save(
+        {"mu": standardiser.mu, "gamma": standardiser.gamma},
+        standardiser_path,
+    )
+
+    # --- Save metadata as plain JSON, so it's human-readable ---
+    metadata = dict(metadata) if metadata is not None else {}
+    metadata["n_replicas"] = len(ensemble)
+    metadata_path = os.path.join(save_dir, "metadata.json")
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    print(f"Saved {len(ensemble)} replicas + standardiser to {save_dir}")
+
+
+def load_ensemble(
+    architecture_fn, save_dir: str, device: torch.device
+) -> tuple[list[nn.Module], CorrelatorStandardiser, dict]:
+    """
+    Load a previously saved ensemble back into memory.
+
+    Parameters
+    ----------
+    architecture_fn : the same architecture function used at training
+        time (e.g. arcS) -- must match, since state_dict only contains
+        weight values, not the architecture that produced them. Loading
+        arcS weights into an arcM model would fail with a shape mismatch.
+    save_dir : directory previously written by save_ensemble().
+    device : torch.device to load the models onto.
+
+    Returns
+    -------
+    (ensemble, standardiser, metadata)
+        ensemble     : list of nn.Module, each in eval() mode.
+        standardiser : CorrelatorStandardiser with mu, gamma restored.
+        metadata     : the dict saved alongside the weights.
+    """
+    # --- Load metadata first, to know how many replicas to expect ---
+    metadata_path = os.path.join(save_dir, "metadata.json")
+    with open(metadata_path, "r") as f:
+        metadata = json.load(f)
+    n_replicas = metadata["n_replicas"]
+
+    # --- Rebuild the standardiser ---
+    standardiser_path = os.path.join(save_dir, "standardiser.pt")
+    saved_stats = torch.load(standardiser_path, map_location=device)
+    standardiser = CorrelatorStandardiser()
+    standardiser.mu = saved_stats["mu"].to(device)
+    standardiser.gamma = saved_stats["gamma"].to(device)
+
+    # --- Rebuild each replica ---
+    ensemble = []
+    for r in range(1, n_replicas + 1):
+        weights_path = os.path.join(save_dir, f"replica_{r:02d}.pt")
+        state_dict = torch.load(weights_path, map_location=device)
+
+        model = architecture_fn()  # fresh model, correct architecture
+        model.load_state_dict(state_dict)  # overwrite its random weights
+        model.to(device)
+        model.eval()  # inference mode, not training mode
+
+        ensemble.append(model)
+
+    return ensemble, standardiser, metadata
+
+
 # =============================================================================
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("Architecture summary")
-    print("=" * 60)
+    from TrainingSets_Full_Chebyshev import load_training_set
 
-    for name, fn in [("arcS", arcS), ("arcM", arcM), ("arcL", arcL)]:
-        net = fn()
-        n_params = count_parameters(net)
-        print(f"\n{name}: {n_params:,} trainable parameters")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Print each layer with its output shape for a single sample
-        dummy = torch.zeros(1, 64)  # batch of 1 correlator
-        with torch.no_grad():
-            out = net(dummy)
-        print(f"  Input shape:  {dummy.shape}")
-        print(f"  Output shape: {out.shape}")
+    # lattice data from the 48 ensemble for the 2pi.g5.001 operator
+    # we remove the irrelevant t=0 time-slice
+    two_pt_data = np.load("noise_injection_data/2pt_data_64_folded.npy")[:, 1:]
+    lattice_mean = np.mean(two_pt_data, axis=0)
+    cov_mat = np.cov(two_pt_data, rowvar=False, bias=False)
 
-        # Walk through layers manually to show intermediate shapes
-        x = dummy.unsqueeze(1)  # (1, 1, 64)
-        print(f"  After unsqueeze:        {x.shape}")
-        for i, layer in enumerate(net.conv_block):
-            x = layer(x)
-            print(f"  After conv_block[{i}]:    {x.shape}")
-        for i, layer in enumerate(net.fc_block):
-            x = layer(x)
-            print(f"  After fc_block[{i}]:      {x.shape}")
+    # One (architecture, n_b, n_rho, sigma) combination from Table IV.
+    # This example reproduces the N^ref_n row: arcS, Nb=512, Nrho=800k.
+    sigma = 0.44
+    n_b = 16
+    n_rho = 50_000
 
-    print("\n" + "=" * 60)
-    print("Standardiser demo")
-    print("=" * 60)
-    fake_correlators = torch.randn(1000, 64).abs()  # positive fake data
-    fake_correlators *= torch.exp(
-        -torch.linspace(0, 5, 64)
-    )  # exponential decay
-    standardizer = CorrelatorStandardiser()
-    standardized = standardizer.fit_transform(fake_correlators)
-    print(
-        f"Before: mean={fake_correlators.mean():.3f}, "
-        f"std={fake_correlators.std():.3f}"
+    data = load_training_set(
+        filepath=f"Training_sets/64_data/ts_nb{n_b}.h5",
+        sigma=sigma,
+        n_rho=n_rho,
     )
-    print(
-        f"After:  mean={standardized.mean():.3f}, "
-        f"std={standardized.std():.3f}"
-    )
+    correlators = data["correlators"]
+    smeared_rho = data["smeared_rho"]
 
-    print("\n" + "=" * 60)
-    print("NoiseInjector / per-replica DataLoader demo")
-    print("=" * 60)
-
-    n_T, n_E, n_rho = 64, 47, 200  # small fake dataset for a quick check
-
-    rng = np.random.default_rng(42)
-
-    # Fake clean correlators (decaying, positive) and fake targets
-    fake_clean_correlators = np.exp(-np.linspace(0, 5, n_T)) * rng.uniform(
-        0.5, 1.5, size=(n_rho, n_T)
-    )
-    fake_smeared_rho = rng.uniform(-1, 1, size=(n_rho, n_E))
-
-    # Fake lattice covariance: symmetric positive-definite matrix
-    A = rng.normal(size=(n_T, n_T))
-    fake_cov_mat = 1e-4 * (A @ A.T + n_T * np.eye(n_T))  # guaranteed PD
-    fake_lattice_mean = fake_clean_correlators.mean(axis=0)
-
-    # Fit the standardizer ONCE on the clean data, as the ensemble does
-    standardizer = fit_standardizer(fake_clean_correlators)
-
-    # Build two independent NoiseInjectors, simulating replica 1 and 2
-    injector_1 = NoiseInjector(fake_cov_mat, fake_lattice_mean, seed=101)
-    injector_2 = NoiseInjector(fake_cov_mat, fake_lattice_mean, seed=202)
-
-    noisy_1 = injector_1.sample(fake_clean_correlators)
-    noisy_2 = injector_2.sample(fake_clean_correlators)
-
-    # Confirm the two replicas' noise draws are different from each other...
-    max_diff = np.max(np.abs(noisy_1 - noisy_2))
-    print(
-        f"Max |noisy_1 - noisy_2| across all entries: {max_diff:.4f} "
-        f"(should be > 0: independent noise per replica)"
-    )
-
-    # ...but both are still centred on the same clean correlators
-    mean_dev_1 = np.mean(np.abs(noisy_1 - fake_clean_correlators))
-    mean_dev_2 = np.mean(np.abs(noisy_2 - fake_clean_correlators))
-    print(f"Mean |noisy_1 - clean|: {mean_dev_1:.4f}")
-    print(f"Mean |noisy_2 - clean|: {mean_dev_2:.4f}")
-    print(
-        "(both should be small and similar in size -- same underlying "
-        "clean pairs, just different noise realisations)"
-    )
-
-    # Build DataLoaders for "replica 1" end to end
-    train_loader, val_loader = build_replica_dataloaders(
-        clean_correlators=fake_clean_correlators,
-        smeared_rho=fake_smeared_rho,
-        standardizer=standardizer,
-        noise_injector=injector_1,
+    ensemble, standardiser = train_ensemble(
+        architecture_fn=arcS,
+        clean_correlators=correlators,
+        smeared_rho=smeared_rho,
+        cov_mat=cov_mat,
+        lattice_mean=lattice_mean,
+        device=device,
+        n_replicas=20,
         batch_size=32,
         val_fraction=0.2,
-        split_seed=101,
+        base_seed=0,
     )
 
-    n_train_batches = len(train_loader)
-    n_val_batches = len(val_loader)
-    n_train_samples = len(train_loader.dataset)
-    n_val_samples = len(val_loader.dataset)
-    print(f"\nTrain: {n_train_samples} samples in {n_train_batches} batches")
-    print(f"Val:   {n_val_samples} samples in {n_val_batches} batches")
-
-    # Pull one batch to confirm shapes are correct
-    batch_correlators, batch_targets = next(iter(train_loader))
-    print(
-        f"One training batch: correlators {batch_correlators.shape}, "
-        f"targets {batch_targets.shape}"
+    save_ensemble(
+        ensemble,
+        standardiser,
+        save_dir=f"trained_models/arcS_nb{n_b}_nrho{n_rho}_sigma{sigma}",
+        metadata={
+            "architecture": "arcS",
+            "n_b": n_b,
+            "n_rho": n_rho,
+            "sigma": sigma,
+        },
     )

@@ -239,9 +239,7 @@ def generate_all_training_sets(
 
     for file_idx, n_b in enumerate(n_b_values, 1):
 
-        fname = os.path.join(
-            output_dir, f"training_set_nb{n_b}_nrho{n_rho_max}.h5"
-        )
+        fname = os.path.join(output_dir, f"ts_nb{n_b}.h5")
 
         if os.path.exists(fname) and not overwrite:
             log.info(
@@ -421,12 +419,12 @@ if __name__ == "__main__":
 
     # lattice data from the 48 ensemble for the 2pi.g5.001 operator
     # we remove the irrelevant t=0 time-slice
-    two_pt_data = np.load("noise_injection_data/2pt_data_48_folded.npy")[:, 1:]
+    two_pt_data = np.load("noise_injection_data/2pt_data_64_folded.npy")[:, 1:]
     n_T = len(two_pt_data[0])
 
     ch_nodes = 10_000
 
-    output_dir = "/home/joe/work/Inversion_problem/Training_sets"
+    output_dir = "/home/joe/work/Inversion_problem/Training_sets/64_data"
 
     generate_all_training_sets(
         energies=e_range,

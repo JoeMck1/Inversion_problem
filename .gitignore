@@ -101,4 +101,7 @@ target/
 
 *.prof
 
+*.pt
+metadata.json
+
 sandbox*.py

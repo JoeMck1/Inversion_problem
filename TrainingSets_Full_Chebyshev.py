@@ -63,7 +63,6 @@ class TrainingSet:
 
         n_vals = np.arange(self.n_b + 1)
         self._T_xmin = np.cos(n_vals * np.arccos(self.x_min()))
-        pass
 
     # ── static helpers ──────────────────────────────────────────────────────
 

@@ -27,7 +27,7 @@ import os
 
 import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
 
 # =============================================================================
 # BUILDING BLOCKS
@@ -367,7 +367,7 @@ class NoiseInjector:
     actually supports. This mirrors what np.random.multivariate_normal
     does internally by default (it uses an SVD-based decomposition).
     The difference being SVD, instead of clipping negative eigenvalues
-    to 0, clips them to |\lamba|.
+    to 0, clips them to |lambda|.
 
     Sampling identity used: if Sigma = Q Lambda Q^T (eigendecomposition,
     with Lambda's negative entries clipped to 0) and we set
@@ -513,7 +513,8 @@ def make_lr_lambda(warmup_epochs: int = 25, decay_rate: float = 4e-4):
 
     Returns
     -------
-    A callable lr_lambda(epoch) -> float  suitable for torch.optim.lr_scheduler.LambdaLR.
+    A callable lr_lambda(epoch) -> float  suitable for
+    torch.optim.lr_scheduler.LambdaLR.
     """
 
     def lr_lambda(epoch: int) -> float:
@@ -765,7 +766,7 @@ def build_replica_dataloaders(
     dataset = torch.utils.data.TensorDataset(standardized_t, targets_t)
 
     n_total = len(dataset)
-    n_val = int(round(n_total * val_fraction))
+    n_val = round(n_total * val_fraction)
     n_train = n_total - n_val
 
     generator = torch.Generator().manual_seed(split_seed)
@@ -963,7 +964,7 @@ def save_ensemble(
 
 
 def load_ensemble(
-    architecture_fn, save_dir: str, device: torch.device
+    architecture_fn, load_dir: str, device: torch.device
 ) -> tuple[list[nn.Module], CorrelatorStandardiser, dict]:
     """
     Load a previously saved ensemble back into memory.
@@ -974,7 +975,7 @@ def load_ensemble(
         time (e.g. arcS) -- must match, since state_dict only contains
         weight values, not the architecture that produced them. Loading
         arcS weights into an arcM model would fail with a shape mismatch.
-    save_dir : directory previously written by save_ensemble().
+    load_dir : directory previously written by save_ensemble().
     device : torch.device to load the models onto.
 
     Returns
@@ -985,13 +986,13 @@ def load_ensemble(
         metadata     : the dict saved alongside the weights.
     """
     # --- Load metadata first, to know how many replicas to expect ---
-    metadata_path = os.path.join(save_dir, "metadata.json")
+    metadata_path = os.path.join(load_dir, "metadata.json")
     with open(metadata_path, "r") as f:
         metadata = json.load(f)
     n_replicas = metadata["n_replicas"]
 
     # --- Rebuild the standardiser ---
-    standardiser_path = os.path.join(save_dir, "standardiser.pt")
+    standardiser_path = os.path.join(load_dir, "standardiser.pt")
     saved_stats = torch.load(standardiser_path, map_location=device)
     standardiser = CorrelatorStandardiser()
     standardiser.mu = saved_stats["mu"].to(device)
@@ -1000,7 +1001,7 @@ def load_ensemble(
     # --- Rebuild each replica ---
     ensemble = []
     for r in range(1, n_replicas + 1):
-        weights_path = os.path.join(save_dir, f"replica_{r:02d}.pt")
+        weights_path = os.path.join(load_dir, f"replica_{r:02d}.pt")
         state_dict = torch.load(weights_path, map_location=device)
 
         model = architecture_fn()  # fresh model, correct architecture
@@ -1029,7 +1030,7 @@ if __name__ == "__main__":
     # One (architecture, n_b, n_rho, sigma) combination from Table IV.
     # This example reproduces the N^ref_n row: arcS, Nb=512, Nrho=800k.
     sigma = 0.44
-    n_b = 16
+    n_b = 32
     n_rho = 50_000
 
     data = load_training_set(
